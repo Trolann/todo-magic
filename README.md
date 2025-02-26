@@ -1,8 +1,8 @@
 # 📝✨ TODO Magic
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
-[![GitHub Release](https://img.shields.io/github/release/trolann/todo_magic.svg)](https://github.com/trolann/todo_magic/releases)
-[![GitHub License](https://img.shields.io/github/license/trolann/todo_magic.svg)](https://github.com/trolann/todo_magic/blob/main/LICENSE)
+[![GitHub Release](https://img.shields.io/github/release/trolann/todo-magic.svg)](https://github.com/trolann/todo-magic/releases)
+[![GitHub License](https://img.shields.io/github/license/trolann/todo-magic.svg)](https://github.com/trolann/todo-magic/blob/main/LICENSE)
 
 Add magical parsing to your Home Assistant to-do lists! This integration automatically extracts due dates and times from your to-do item summaries and converts them into proper due dates in Home Assistant.
 
