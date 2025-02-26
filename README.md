@@ -1,46 +1,117 @@
-# Notice
+# 📝✨ TODO Magic
 
-The component and platforms in this repository are not meant to be used by a
-user, but as a "blueprint" that custom component developers can build
-upon, to make more awesome stuff.
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
+[![GitHub Release](https://img.shields.io/github/release/trolann/todo_magic.svg)](https://github.com/trolann/todo_magic/releases)
+[![GitHub License](https://img.shields.io/github/license/trolann/todo_magic.svg)](https://github.com/trolann/todo_magic/blob/main/LICENSE)
 
-HAVE FUN! 😎
+Add magical parsing to your Home Assistant to-do lists! This integration automatically extracts due dates and times from your to-do item summaries and converts them into proper due dates in Home Assistant.
 
-## Why?
+## ✨ Features
 
-This is simple, by having custom_components look (README + structure) the same
-it is easier for developers to help each other and for users to start using them.
+- 🔍 Automatically parses due dates from your to-do items using a wide variety of date formats
+- ⏰ Recognizes and sets due times (defaults to 23:59 if not specified)
+- 🧩 Works with any Home Assistant to-do list integration
+- 🔄 *(Coming Soon)* Support for recurring tasks with flexible scheduling
 
-If you are a developer and you want to add things to this "blueprint" that you think more
-developers will have use for, please open a PR to add it :)
+## 📋 Syntax
 
-## What?
+```
+<todo summary/title> <due date> <optionally 'at' or '@'> <due time (defaults to 23:59)> <repeat pattern>
+```
 
-This repository contains multiple files, here is a overview:
+### Examples:
 
-File | Purpose | Documentation
--- | -- | --
-`.devcontainer.json` | Used for development/testing with Visual Studio Code. | [Documentation](https://code.visualstudio.com/docs/remote/containers)
-`.github/ISSUE_TEMPLATE/*.yml` | Templates for the issue tracker | [Documentation](https://help.github.com/en/github/building-a-strong-community/configuring-issue-templates-for-your-repository)
-`custom_components/integration_blueprint/*` | Integration files, this is where everything happens. | [Documentation](https://developers.home-assistant.io/docs/creating_component_index)
-`CONTRIBUTING.md` | Guidelines on how to contribute. | [Documentation](https://help.github.com/en/github/building-a-strong-community/setting-guidelines-for-repository-contributors)
-`LICENSE` | The license file for the project. | [Documentation](https://help.github.com/en/github/creating-cloning-and-archiving-repositories/licensing-a-repository)
-`README.md` | The file you are reading now, should contain info about the integration, installation and configuration instructions. | [Documentation](https://help.github.com/en/github/writing-on-github/basic-writing-and-formatting-syntax)
-`requirements.txt` | Python packages used for development/lint/testing this integration. | [Documentation](https://pip.pypa.io/en/stable/user_guide/#requirements-files)
+- `Buy groceries 2/28/25 [w]` → Due on Feb 28, 2025 at 23:59; repeating every 7 days
+- `Call mom 3/1/25 @ 17:00` → Due on Mar 1, 2025 at 5:00 PM
+- `Take out trash 3/5/25 at 8:00` → Due on Mar 5, 2025 at 8:00 AM
+- `Submit report 2025-03-15` → Due on Mar 15, 2025 at 23:59
 
-## How?
+### Date Formats
 
-1. Create a new repository in GitHub, using this repository as a template by clicking the "Use this template" button in the GitHub UI.
-1. Open your new repository in Visual Studio Code devcontainer (Preferably with the "`Dev Containers: Clone Repository in Named Container Volume...`" option).
-1. Rename all instances of the `integration_blueprint` to `custom_components/<your_integration_domain>` (e.g. `custom_components/awesome_integration`).
-1. Rename all instances of the `Integration Blueprint` to `<Your Integration Name>` (e.g. `Awesome Integration`).
-1. Run the `scripts/develop` to start HA and test out your new integration.
+The component accepts a wide variety of date formats:
+- MM/DD/YY (e.g., 3/5/25)
+- MM/DD/YYYY (e.g., 3/5/2025)
+- MM-DD-YY, MM-DD-YYYY
+- YYYY-MM-DD (e.g., 2025-03-05)
+- YYYY/MM/DD, YYYY.MM.DD
+- DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY
+- And many other variations!
 
-## Next steps
+### 🔄 Repeat Patterns (Coming Soon)
 
-These are some next steps you may want to look into:
-- Add tests to your integration, [`pytest-homeassistant-custom-component`](https://github.com/MatthewFlamm/pytest-homeassistant-custom-component) can help you get started.
-- Add brand images (logo/icon) to https://github.com/home-assistant/brands.
-- Create your first release.
-- Share your integration on the [Home Assistant Forum](https://community.home-assistant.io/).
-- Submit your integration to [HACS](https://hacs.xyz/docs/publish/start).
+Repeat patterns will allow scheduling recurring tasks:
+- `d` - Daily
+- `w` - Weekly
+- `m` - Monthly
+- `y` - Yearly
+- `w-mwf` - Weekly on Monday, Wednesday, and Friday
+
+*Note: Repeat functionality is currently under development*
+
+## 🛠️ Installation
+
+### HACS Installation (Recommended)
+
+1. Make sure you have [HACS](https://hacs.xyz/) installed
+2. Go to HACS → Integrations → ⋮ (top right) → Custom repositories
+3. Add the URL `https://github.com/username/todo-magic` with category "Integration"
+4. Click "Add"
+5. Find "TODO Magic" in the integrations list and click "Download"
+6. Restart Home Assistant
+
+### Manual Installation
+
+1. Download the latest release from the [releases page](https://github.com/username/todo-magic/releases)
+2. Create a `custom_components/todo_magic` directory in your Home Assistant configuration directory
+3. Extract the downloaded files into this directory
+4. Restart Home Assistant
+
+## ⚙️ Configuration
+
+No configuration is required! Simply install the integration and it will automatically process all to-do items in your Home Assistant instance.
+
+The default time for items without a specified time is 23:59.
+
+Coming soon: configuration items to set default times.
+
+## 💡 Usage
+
+1. Add to-do items to any Home Assistant to-do list using the syntax shown above
+2. When you add a new to-do item, TODO Magic will:
+   - Extract the date and time from the summary text
+   - Set the proper due date/time properties on the to-do item
+   - Rename the to-do item to remove the date/time information
+   - Store the repeat information (coming soon)
+
+The integration listens for state changes and processes new to-do items automatically. It also maintains tracking to avoid processing the same item multiple times.
+
+## 🐛 Reporting Issues & Feature Requests
+
+Found a bug or have a great idea for a new feature? Please open an issue on the [GitHub repository](https://github.com/username/todo-magic/issues).
+
+When reporting bugs, please include:
+- A clear description of what happened vs. what you expected
+- Steps to reproduce the issue
+- Your Home Assistant version
+- A sample of the to-do item text that's not working correctly
+- Any relevant log entries (you can enable debug logging for this component)
+
+### Enabling Debug Logging
+
+Add the following to your `configuration.yaml` to enable debug logging:
+
+```yaml
+logger:
+  default: info
+  logs:
+    custom_components.todo_magic: debug
+```
+
+## 📝 License
+
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/username/todo-magic/blob/main/LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- Thanks to the Home Assistant community for their amazing support
+- All the contributors who make this project better
