@@ -115,3 +115,6 @@ This project is licensed under the MIT License - see the [LICENSE](https://githu
 
 - Thanks to the Home Assistant community for their amazing support
 - All the contributors who make this project better
+- @ludeeus for the HACS integration blueprint
+- @kolaente for creating Vikunja which was the inspiration for this project
+- @Craftoncu for the `hacs-vikunja-integration` repository which served as a starting point for this project
