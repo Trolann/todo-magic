@@ -1,5 +1,5 @@
 {
   "name": "Todo Magic",
-  "homeassistant": "2025.2.4",
-  "hacs": "2.0.1"
+  "homeassistant": "2023.11",
+  "hacs": "2.0.0"
 }
