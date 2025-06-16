@@ -15,17 +15,23 @@
     "step": {
       "init": {
         "title": "Todo Magic Settings",
-        "description": "Configure Todo Magic features for each of your todo lists: {todo_entities}",
-        "data": {
-          "auto_due_parsing": "Enable automatic due date parsing",
-          "auto_sort": "Enable automatic sorting",
-          "process_recurring": "Process recurring tasks",
-          "clear_days": "Clear completed tasks every X days (0 = disabled)"
+        "description": "Configure Todo Magic features for your {todo_count} todo lists. Each list can have different settings enabled.",
+        "data_description": {
+          "auto_due_parsing": "Automatically extract dates from task text and set due dates",
+          "auto_sort": "Automatically sort tasks by due date and priority",
+          "process_recurring": "Handle recurring tasks (e.g., [daily], [weekly])",
+          "clear_days": "Auto-clear completed tasks (-1 = disabled, 0 = immediately, 1+ = after X days)"
         }
       }
     },
     "error": {
       "no_todo_entities": "No todo entities found in your Home Assistant instance."
     }
+  },
+  "selector": {
+    "auto_due_parsing": "Auto Due Date Parsing",
+    "auto_sort": "Auto Sort Tasks",
+    "process_recurring": "Process Recurring Tasks",
+    "clear_days": "Auto-Clear Completed Tasks (Days)"
   }
 }

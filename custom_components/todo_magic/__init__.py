@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from functools import partial
+from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_STATE_CHANGED, Platform
 from homeassistant.core import Event, HomeAssistant, callback
@@ -20,24 +21,43 @@ PLATFORMS: list[Platform] = [Platform.TODO]
 # Keep track of items we've already processed to prevent loops
 PROCESSED_ITEMS = set()
 
-def check_date_format(given_string) -> datetime | None:
+
+def check_date_format(given_string: str) -> datetime | None:
+    """Check if given string matches any supported date format."""
     date_formats = ['%m/%d/%y', '%m/%d/%Y', '%m-%d-%y', '%m-%d-%Y', '%Y-%m-%d', '%Y/%m/%d', '%Y.%m.%d', '%d-%m-%Y', '%d/%m/%Y', '%d.%m.%Y', '%m-%d-%Y', '%m/%d/%Y', '%m.%d.%Y', '%Y-%d-%m', '%Y/%d/%m', '%Y.%d.%m', '%d-%Y-%m', '%d/%Y/%m', '%d.%Y.%m', '%m-%Y-%d', '%m/%Y/%d', '%m.%Y.%d']
     return check_formats(given_string, date_formats)
 
-def check_time_format(given_string) -> datetime | None:
+
+def check_time_format(given_string: str) -> datetime | None:
+    """Check if given string matches any supported time format."""
     time_formats = ['%H:%M', '%H %M', '%H%M']
     return check_formats(given_string, time_formats)
 
-def check_formats(given_string, formats) -> datetime | None:
+
+def check_formats(given_string: str, formats: list[str]) -> datetime | None:
+    """Check if given string matches any of the provided formats."""
     for given_format in formats:
         try:
             return_time = datetime.strptime(given_string, given_format)
             return return_time
         except ValueError:
             continue
+    return None
+
+
+def get_entity_settings(options: dict[str, Any], entity_id: str) -> dict[str, Any]:
+    """Get settings for a specific entity from options."""
+    entity_key = entity_id.replace(".", "_")
+    return {
+        "auto_due_parsing": options.get(f"{entity_key}_auto_due_parsing", True),
+        "auto_sort": options.get(f"{entity_key}_auto_sort", False),
+        "process_recurring": options.get(f"{entity_key}_process_recurring", False),
+        "clear_days": options.get(f"{entity_key}_clear_days", -1),
+    }
+
 
 @callback
-def state_changed_listener(hass: HomeAssistant, evt: Event) -> None:
+def state_changed_listener(hass: HomeAssistant, entry: ConfigEntry, evt: Event) -> None:
     """Handle state changed events for todo entities."""
     entity_id = evt.data.get("entity_id", "")
     if not entity_id.startswith("todo."):
@@ -47,15 +67,23 @@ def state_changed_listener(hass: HomeAssistant, evt: Event) -> None:
     if not new_state or new_state.state == "unavailable":
         return
 
+    # Get settings for this entity
+    settings = get_entity_settings(entry.options, entity_id)
+    
+    # Skip processing if auto_due_parsing is disabled for this entity
+    if not settings["auto_due_parsing"]:
+        return
+
     LOGGER.debug("Processing state change for %s", entity_id)
 
     # Create background task to handle the updates with better tracking
     hass.async_create_background_task(
-        process_todo_items(hass, entity_id),
+        process_todo_items(hass, entity_id, settings),
         name=f"todo_magic_update_{entity_id}"
     )
 
-async def process_todo_items(hass: HomeAssistant, entity_id: str) -> None:
+
+async def process_todo_items(hass: HomeAssistant, entity_id: str, settings: dict[str, Any]) -> None:
     """Process todo items for the given entity."""
     try:
         result = await hass.services.async_call(
@@ -139,8 +167,22 @@ async def process_todo_items(hass: HomeAssistant, entity_id: str) -> None:
             else:
                 # Already has prefix, but mark as processed
                 PROCESSED_ITEMS.add(item_key)
+
+        # TODO: Implement auto-sort functionality
+        if settings["auto_sort"]:
+            LOGGER.debug("Auto-sort enabled for %s but not yet implemented", entity_id)
+
+        # TODO: Implement recurring task processing
+        if settings["process_recurring"]:
+            LOGGER.debug("Recurring task processing enabled for %s but not yet implemented", entity_id)
+
+        # TODO: Implement automatic clearing of completed tasks
+        if settings["clear_days"] >= 0:
+            LOGGER.debug("Auto-clear enabled for %s every %d days but not yet implemented", entity_id, settings["clear_days"])
+
     except Exception as err:
         LOGGER.error("Error processing todo items: %s", err)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -155,7 +197,7 @@ async def async_setup_entry(
     LOGGER.debug("Registering state change listener")
     remove_listener = hass.bus.async_listen(
         EVENT_STATE_CHANGED,
-        partial(state_changed_listener, hass)
+        partial(state_changed_listener, hass, entry)
     )
 
     # Make sure to clean up the listener when unloading
@@ -164,6 +206,7 @@ async def async_setup_entry(
     # Set up platforms (keeping this empty since we don't need an actual platform)
     LOGGER.debug("Todo Magic setup complete")
     return True
+
 
 async def async_unload_entry(
     hass: HomeAssistant,

@@ -79,37 +79,55 @@ class MagicTodoOptionsFlowHandler(config_entries.OptionsFlow):
         schema_dict = {}
         current_options = self.config_entry.options
 
+        # Sort entities by friendly name for better organization
+        todo_entities.sort(key=lambda x: x[1])
+
         for entity_id, friendly_name in todo_entities:
             entity_key = entity_id.replace(".", "_")
+            
+            # Create a section header using the friendly name
+            section_title = f"──── {friendly_name} ────"
             
             # Auto-due date parsing
             schema_dict[vol.Optional(
                 f"{entity_key}_auto_due_parsing",
-                default=current_options.get(f"{entity_key}_auto_due_parsing", True)
-            )] = bool
+                default=current_options.get(f"{entity_key}_auto_due_parsing", True),
+                description={"suggested_value": current_options.get(f"{entity_key}_auto_due_parsing", True)}
+            )] = selector.BooleanSelector()
             
             # Auto-sort
             schema_dict[vol.Optional(
                 f"{entity_key}_auto_sort",
-                default=current_options.get(f"{entity_key}_auto_sort", False)
-            )] = bool
+                default=current_options.get(f"{entity_key}_auto_sort", False),
+                description={"suggested_value": current_options.get(f"{entity_key}_auto_sort", False)}
+            )] = selector.BooleanSelector()
             
             # Process recurring tasks
             schema_dict[vol.Optional(
                 f"{entity_key}_process_recurring",
-                default=current_options.get(f"{entity_key}_process_recurring", False)
-            )] = bool
+                default=current_options.get(f"{entity_key}_process_recurring", False),
+                description={"suggested_value": current_options.get(f"{entity_key}_process_recurring", False)}
+            )] = selector.BooleanSelector()
             
-            # Clear todolist every X days
+            # Clear todolist every X days - using -1 for disabled, 0+ for enabled
+            clear_days_default = current_options.get(f"{entity_key}_clear_days", -1)
             schema_dict[vol.Optional(
                 f"{entity_key}_clear_days",
-                default=current_options.get(f"{entity_key}_clear_days", 0)
-            )] = vol.All(int, vol.Range(min=0))
+                default=clear_days_default,
+                description={"suggested_value": clear_days_default}
+            )] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-1,
+                    max=365,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX
+                )
+            )
 
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(schema_dict),
             description_placeholders={
-                "todo_entities": ", ".join([name for _, name in todo_entities])
+                "todo_count": str(len(todo_entities))
             },
         )
