@@ -85,36 +85,33 @@ class MagicTodoOptionsFlowHandler(config_entries.OptionsFlow):
         for entity_id, friendly_name in todo_entities:
             entity_key = entity_id.replace(".", "_")
             
-            # Create a section header using the friendly name
-            section_title = f"──── {friendly_name} ────"
-            
-            # Auto-due date parsing
+            # Auto-due date parsing with friendly name
             schema_dict[vol.Optional(
                 f"{entity_key}_auto_due_parsing",
                 default=current_options.get(f"{entity_key}_auto_due_parsing", True),
-                description={"suggested_value": current_options.get(f"{entity_key}_auto_due_parsing", True)}
+                description=f"{friendly_name}: Auto Due Date Parsing"
             )] = selector.BooleanSelector()
             
-            # Auto-sort
+            # Auto-sort with friendly name
             schema_dict[vol.Optional(
                 f"{entity_key}_auto_sort",
                 default=current_options.get(f"{entity_key}_auto_sort", False),
-                description={"suggested_value": current_options.get(f"{entity_key}_auto_sort", False)}
+                description=f"{friendly_name}: Auto Sort Tasks"
             )] = selector.BooleanSelector()
             
-            # Process recurring tasks
+            # Process recurring tasks with friendly name
             schema_dict[vol.Optional(
                 f"{entity_key}_process_recurring",
                 default=current_options.get(f"{entity_key}_process_recurring", False),
-                description={"suggested_value": current_options.get(f"{entity_key}_process_recurring", False)}
+                description=f"{friendly_name}: Process Recurring Tasks"
             )] = selector.BooleanSelector()
             
-            # Clear todolist every X days - using -1 for disabled, 0+ for enabled
+            # Clear todolist every X days with friendly name
             clear_days_default = current_options.get(f"{entity_key}_clear_days", -1)
             schema_dict[vol.Optional(
                 f"{entity_key}_clear_days",
                 default=clear_days_default,
-                description={"suggested_value": clear_days_default}
+                description=f"{friendly_name}: Auto-Clear Days (-1=disabled, 0=immediate, 1+=days)"
             )] = selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=-1,
