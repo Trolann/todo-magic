@@ -83,6 +83,46 @@ def state_changed_listener(hass: HomeAssistant, entry: ConfigEntry, evt: Event) 
     )
 
 
+async def options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options update."""
+    LOGGER.debug("Options updated, reloading Todo Magic integration")
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def trigger_startup_parsing(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Trigger parsing for all entities with auto_due_parsing enabled on startup."""
+    # Get all todo entities
+    todo_entity_ids = [eid for eid in hass.states.async_entity_ids(TODO_DOMAIN)
+                      if hass.states.get(eid) and hass.states.get(eid).state != "unavailable"]
+    
+    enabled_entities = []
+    
+    for entity_id in todo_entity_ids:
+        settings = get_entity_settings(entry.options, entity_id)
+        if settings["auto_due_parsing"]:
+            enabled_entities.append(entity_id)
+    
+    if enabled_entities:
+        LOGGER.debug("Triggering startup parsing for entities with auto_due_parsing enabled: %s", enabled_entities)
+        
+        # Clear processed items for all enabled entities to ensure full processing
+        items_to_remove = []
+        for entity_id in enabled_entities:
+            items_to_remove.extend([item_key for item_key in PROCESSED_ITEMS if item_key.startswith(f"{entity_id}_")])
+        
+        for item_key in items_to_remove:
+            PROCESSED_ITEMS.discard(item_key)
+        
+        # Trigger parsing for each enabled entity
+        for entity_id in enabled_entities:
+            settings = get_entity_settings(entry.options, entity_id)
+            hass.async_create_background_task(
+                process_todo_items(hass, entity_id, settings),
+                name=f"todo_magic_startup_parse_{entity_id}"
+            )
+
+
+
 async def process_todo_items(hass: HomeAssistant, entity_id: str, settings: dict[str, Any]) -> None:
     """Process todo items for the given entity."""
     try:
@@ -203,9 +243,24 @@ async def async_setup_entry(
     # Make sure to clean up the listener when unloading
     entry.async_on_unload(remove_listener)
 
+    # Register update listener for options changes
+    entry.add_update_listener(options_update_listener)
+
+    # Trigger parsing for all entities with auto_due_parsing enabled on startup
+    await trigger_startup_parsing(hass, entry)
+
     # Set up platforms (keeping this empty since we don't need an actual platform)
     LOGGER.debug("Todo Magic setup complete")
     return True
+
+
+async def async_reload_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> bool:
+    """Reload config entry."""
+    await async_unload_entry(hass, entry)
+    return await async_setup_entry(hass, entry)
 
 
 async def async_unload_entry(

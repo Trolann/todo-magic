@@ -11,7 +11,10 @@ Add magical parsing to your Home Assistant to-do lists! This integration automat
 - 🔍 Automatically parses due dates from your to-do items using a wide variety of date formats
 - ⏰ Recognizes and sets due times (defaults to 23:59 if not specified)
 - 🧩 Works with any Home Assistant to-do list integration
+- ⚙️ Per-list configuration settings with friendly UI
 - 🔄 *(Coming Soon)* Support for recurring tasks with flexible scheduling
+- 📅 *(Planned)* Smart list management based on due date ranges
+- 🗓️ *(Planned)* Calendar integration for daily/weekly/monthly lists
 
 ## 📋 Syntax
 
@@ -36,6 +39,15 @@ The component accepts a wide variety of date formats:
 - YYYY/MM/DD, YYYY.MM.DD
 - DD-MM-YYYY, DD/MM/YYYY, DD.MM.YYYY
 - And many other variations!
+
+### Natural Language Dates *(Coming Soon)*
+
+- `today` - Today's date
+- `tomorrow` - Tomorrow's date
+- `5d` - 5 days from now
+- `2w` - 2 weeks from now
+- `1m` - 1 month from now
+- `1y` - 1 year from now
 
 ### 🔄 Repeat Patterns (Coming Soon)
 
@@ -68,11 +80,24 @@ Repeat patterns will allow scheduling recurring tasks:
 
 ## ⚙️ Configuration
 
-No configuration is required! Simply install the integration and it will automatically process all to-do items in your Home Assistant instance.
+After installation, you can configure TODO Magic through the Home Assistant UI:
+
+1. Go to Settings → Devices & Services → Integrations
+2. Find "TODO Magic" and click "Configure"
+3. Configure settings for each of your to-do lists:
+   - **Auto Due Date Parsing**: Enable/disable automatic date parsing per list
+   - **Auto-sort**: *(Coming Soon)* Automatically sort items by due date
+   - **Auto-clear Completed**: *(Coming Soon)* Remove completed items after a set time
+   - **Recurring Tasks**: *(Coming Soon)* Enable repeat pattern processing
+
+### Per-List Settings
+
+Each to-do list can be configured independently with its own settings. This allows you to:
+- Enable parsing only on specific lists
+- Set different behaviors for different types of lists
+- Customize the integration to fit your workflow
 
 The default time for items without a specified time is 23:59.
-
-Coming soon: configuration items to set default times.
 
 ## 💡 Usage
 
@@ -84,6 +109,26 @@ Coming soon: configuration items to set default times.
    - Store the repeat information (coming soon)
 
 The integration listens for state changes and processes new to-do items automatically. It also maintains tracking to avoid processing the same item multiple times.
+
+## 🚀 Planned Features
+
+### Smart List Management
+Designate lists as daily, weekly, or monthly lists. Any task added without a due date in the appropriate range will be automatically moved to the correct list:
+- **Daily Lists**: Tasks without due dates within the next day
+- **Weekly Lists**: Tasks without due dates within the next week  
+- **Monthly Lists**: Tasks without due dates within the next month
+- **Fallback List**: Required backup list for tasks that don't fit any timeframe
+
+### Calendar Integration
+Associate daily, weekly, and monthly lists with calendar items for better scheduling and visualization.
+
+### Enhanced Date Parsing
+Natural language date parsing including:
+- Relative dates: `today`, `tomorrow`, `5d`, `2w`, `1m`, `1y`
+- Smart date recognition with context awareness
+
+### Recurring Task System
+Full implementation of repeat patterns with advanced scheduling options.
 
 ## 🐛 Reporting Issues & Feature Requests
 
