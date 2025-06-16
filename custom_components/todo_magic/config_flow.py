@@ -52,6 +52,7 @@ class MagicTodoOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
         self.config_entry = config_entry
+        self.todo_entities = []
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -61,14 +62,14 @@ class MagicTodoOptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
 
         # Get all todo entities
-        todo_entities = []
+        self.todo_entities = []
         for entity_id in self.hass.states.async_entity_ids(TODO_DOMAIN):
             state = self.hass.states.get(entity_id)
             if state:
                 friendly_name = state.attributes.get("friendly_name", entity_id)
-                todo_entities.append((entity_id, friendly_name))
+                self.todo_entities.append((entity_id, friendly_name))
 
-        if not todo_entities:
+        if not self.todo_entities:
             return self.async_show_form(
                 step_id="init",
                 data_schema=vol.Schema({}),
@@ -80,38 +81,37 @@ class MagicTodoOptionsFlowHandler(config_entries.OptionsFlow):
         current_options = self.config_entry.options
 
         # Sort entities by friendly name for better organization
-        todo_entities.sort(key=lambda x: x[1])
+        self.todo_entities.sort(key=lambda x: x[1])
 
-        for entity_id, friendly_name in todo_entities:
+        # Create translation placeholders for entity names
+        entity_names = {}
+        for entity_id, friendly_name in self.todo_entities:
             entity_key = entity_id.replace(".", "_")
+            entity_names[f"{entity_key}_name"] = friendly_name
             
-            # Auto-due date parsing with friendly name
+            # Auto-due date parsing
             schema_dict[vol.Optional(
                 f"{entity_key}_auto_due_parsing",
-                default=current_options.get(f"{entity_key}_auto_due_parsing", True),
-                description=f"{friendly_name}: Auto Due Date Parsing"
+                default=current_options.get(f"{entity_key}_auto_due_parsing", True)
             )] = selector.BooleanSelector()
             
-            # Auto-sort with friendly name
+            # Auto-sort
             schema_dict[vol.Optional(
                 f"{entity_key}_auto_sort",
-                default=current_options.get(f"{entity_key}_auto_sort", False),
-                description=f"{friendly_name}: Auto Sort Tasks"
+                default=current_options.get(f"{entity_key}_auto_sort", False)
             )] = selector.BooleanSelector()
             
-            # Process recurring tasks with friendly name
+            # Process recurring tasks
             schema_dict[vol.Optional(
                 f"{entity_key}_process_recurring",
-                default=current_options.get(f"{entity_key}_process_recurring", False),
-                description=f"{friendly_name}: Process Recurring Tasks"
+                default=current_options.get(f"{entity_key}_process_recurring", False)
             )] = selector.BooleanSelector()
             
-            # Clear todolist every X days with friendly name
+            # Clear todolist every X days
             clear_days_default = current_options.get(f"{entity_key}_clear_days", -1)
             schema_dict[vol.Optional(
                 f"{entity_key}_clear_days",
-                default=clear_days_default,
-                description=f"{friendly_name}: Auto-Clear Days (-1=disabled, 0=immediate, 1+=days)"
+                default=clear_days_default
             )] = selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=-1,
@@ -125,6 +125,7 @@ class MagicTodoOptionsFlowHandler(config_entries.OptionsFlow):
             step_id="init",
             data_schema=vol.Schema(schema_dict),
             description_placeholders={
-                "todo_count": str(len(todo_entities))
+                "todo_count": str(len(self.todo_entities)),
+                **entity_names
             },
         )
