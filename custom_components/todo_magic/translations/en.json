@@ -1,21 +1,31 @@
 {
-    "config": {
-        "step": {
-            "user": {
-                "description": "If you need help with the configuration have a look here: https://github.com/ludeeus/integration_blueprint",
-                "data": {
-                    "username": "Username",
-                    "password": "Password"
-                }
-            }
-        },
-        "error": {
-            "auth": "Username/Password is wrong.",
-            "connection": "Unable to connect to the server.",
-            "unknown": "Unknown error occurred."
-        },
-        "abort": {
-            "already_configured": "This entry is already configured."
-        }
+  "config": {
+    "step": {
+      "user": {
+        "title": "Todo Magic",
+        "description": "Set up Todo Magic to enhance your todo lists with automatic date parsing, sorting, and more.",
+        "data": {}
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only a single configuration of Todo Magic is allowed."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Todo Magic Settings",
+        "description": "Configure Todo Magic features for each of your todo lists: {todo_entities}",
+        "data": {
+          "auto_due_parsing": "Enable automatic due date parsing",
+          "auto_sort": "Enable automatic sorting",
+          "process_recurring": "Process recurring tasks",
+          "clear_days": "Clear completed tasks every X days (0 = disabled)"
+        }
+      }
+    },
+    "error": {
+      "no_todo_entities": "No todo entities found in your Home Assistant instance."
+    }
+  }
 }
