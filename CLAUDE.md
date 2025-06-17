@@ -177,3 +177,4 @@ LIST_TYPES = ["normal", "daily", "weekly", "monthly"]
 - Performance optimization for large todo lists
 - Home Assistant service call patterns and async handling
 - Configuration migration strategies for existing users
+- We don't do linting
