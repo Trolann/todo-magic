@@ -22,6 +22,12 @@ PLATFORMS: list[Platform] = [Platform.TODO]
 # Simple lock to prevent concurrent processing of the same entity
 PROCESSING_LOCKS = set()
 
+# Track completed tasks that have already been processed to prevent duplicates
+PROCESSED_COMPLETED_ITEMS = set()
+
+# Track newly created recurring tasks to prevent reprocessing
+NEWLY_CREATED_RECURRING_TASKS = set()
+
 
 
 def check_date_format(given_string: str) -> datetime | None:
@@ -219,11 +225,12 @@ def calculate_first_occurrence(today: datetime, repeat_info: dict[str, Any]) -> 
     return None
 
 
-def schedule_next_occurrence(current_date: datetime, repeat_info: dict[str, Any]) -> datetime | None:
-    """Calculate the next occurrence date based on repeat pattern.
+def schedule_next_occurrence(completion_date: datetime, original_due_date: datetime, repeat_info: dict[str, Any]) -> datetime | None:
+    """Calculate the next occurrence date based on repeat pattern and completion timing.
     
     Args:
-        current_date: The current due date
+        completion_date: When the task was completed (today)
+        original_due_date: When the task was originally due
         repeat_info: Repeat pattern info from parse_repeat_pattern()
     
     Returns:
@@ -235,17 +242,49 @@ def schedule_next_occurrence(current_date: datetime, repeat_info: dict[str, Any]
     unit = repeat_info['unit']
     interval = repeat_info.get('interval', 1)
     
+    # Determine if completed early, on-time, or late
+    completion_date_only = completion_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    original_due_date_only = original_due_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    
     if repeat_info['type'] == 'simple':
         if unit == 'd':
-            return current_date + timedelta(days=interval)
+            # Daily patterns: always calculate from completion date
+            return completion_date_only + timedelta(days=interval)
         elif unit == 'w':
-            return current_date + timedelta(weeks=interval)
+            # Weekly patterns: calculate from completion date
+            return completion_date_only + timedelta(weeks=interval)
         elif unit == 'm':
-            # Approximate month calculation - could be improved with dateutil
-            return current_date + timedelta(days=interval * 30)
+            # Monthly patterns: calculate based on completion timing
+            if completion_date_only <= original_due_date_only:
+                # Early or on-time: next month from original due date
+                target_month = original_due_date_only.month + interval
+                target_year = original_due_date_only.year
+                while target_month > 12:
+                    target_month -= 12
+                    target_year += 1
+            else:
+                # Late: next month from completion date
+                target_month = completion_date_only.month + interval
+                target_year = completion_date_only.year
+                while target_month > 12:
+                    target_month -= 12
+                    target_year += 1
+            
+            # Set to end of target month at 23:59
+            if target_month == 12:
+                next_month_start = datetime(target_year + 1, 1, 1)
+            else:
+                next_month_start = datetime(target_year, target_month + 1, 1)
+            end_of_month = next_month_start - timedelta(days=1)
+            return end_of_month.replace(hour=23, minute=59, second=0, microsecond=0)
         elif unit == 'y':
-            # Approximate year calculation
-            return current_date + timedelta(days=interval * 365)
+            # Yearly patterns: calculate from original due date if early/on-time, completion if late
+            if completion_date_only <= original_due_date_only:
+                # Early or on-time
+                return original_due_date_only.replace(year=original_due_date_only.year + interval)
+            else:
+                # Late
+                return completion_date_only.replace(year=completion_date_only.year + interval)
     
     elif repeat_info['type'] == 'advanced' and unit == 'w':
         # Advanced weekly patterns with specific days
@@ -264,25 +303,51 @@ def schedule_next_occurrence(current_date: datetime, repeat_info: dict[str, Any]
             return None
         
         target_weekdays.sort()
-        current_weekday = current_date.weekday()
+        completion_weekday = completion_date_only.weekday()
+        original_due_weekday = original_due_date_only.weekday()
         
-        # Find next occurrence day in the current week
-        next_weekday = None
-        for weekday in target_weekdays:
-            if weekday > current_weekday:
-                next_weekday = weekday
-                break
-        
-        if next_weekday is not None:
-            # Next occurrence is later this week
-            days_ahead = next_weekday - current_weekday
-            return current_date + timedelta(days=days_ahead)
+        if completion_date_only <= original_due_date_only:
+            # Early or on-time completion
+            # Find next day in the pattern sequence after the original due day
+            next_weekday = None
+            
+            for weekday in target_weekdays:
+                if weekday > original_due_weekday:
+                    next_weekday = weekday
+                    break
+            
+            if next_weekday is not None:
+                # Next occurrence is later this week
+                days_ahead = next_weekday - completion_weekday
+                if days_ahead <= 0:
+                    # If that day has already passed this week, go to next cycle
+                    days_ahead += 7 + (interval - 1) * 7
+                return completion_date_only + timedelta(days=days_ahead)
+            else:
+                # Next occurrence is first day of next cycle
+                days_to_next_cycle = 7 - completion_weekday + target_weekdays[0] + (interval - 1) * 7
+                return completion_date_only + timedelta(days=days_to_next_cycle)
         else:
-            # Next occurrence is in the next cycle
-            # Go to the first day of next interval
-            days_to_next_week = 7 - current_weekday + target_weekdays[0]
-            weeks_to_add = interval - 1  # We already moved to next week
-            return current_date + timedelta(days=days_to_next_week + (weeks_to_add * 7))
+            # Late completion
+            # Find next day in the pattern sequence after the original due day
+            next_weekday = None
+            for weekday in target_weekdays:
+                if weekday > original_due_weekday:
+                    next_weekday = weekday
+                    break
+            
+            if next_weekday is not None:
+                # Next occurrence is later in the same week as original due date
+                # But calculate from completion date to that day
+                days_to_next = next_weekday - completion_weekday
+                if days_to_next <= 0:
+                    # If that day has already passed this week, go to next cycle
+                    days_to_next += 7 + (interval - 1) * 7
+                return completion_date_only + timedelta(days=days_to_next)
+            else:
+                # Next occurrence is first day of next cycle
+                days_to_next_cycle = 7 - completion_weekday + target_weekdays[0] + (interval - 1) * 7
+                return completion_date_only + timedelta(days=days_to_next_cycle)
     
     return None
 
@@ -515,6 +580,12 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
             # Skip items that already have due dates
             if due:
                 continue
+            
+            # Skip newly created recurring tasks to prevent reprocessing
+            task_key = f"{entity_id}:{summary}"
+            if task_key in NEWLY_CREATED_RECURRING_TASKS:
+                LOGGER.debug("Skipping reprocessing of newly created recurring task: %s", summary)
+                continue
                 
             # Check if summary contains potential date patterns OR repeat patterns
             cleaned_summary = remove_date_prefixes(summary)
@@ -700,6 +771,43 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
         PROCESSING_LOCKS.discard(entity_id)
 
 
+async def find_duplicate_recurring_task(hass: HomeAssistant, entity_id: str, 
+                                       summary_with_pattern: str) -> dict[str, Any] | None:
+    """Find existing task with the same summary and repeat pattern.
+    
+    Args:
+        hass: Home Assistant instance
+        entity_id: Todo entity ID
+        summary_with_pattern: Task summary including repeat pattern
+    
+    Returns:
+        Existing task dict if found, None otherwise
+    """
+    try:
+        result = await hass.services.async_call(
+            TODO_DOMAIN,
+            "get_items",
+            {"entity_id": entity_id},
+            blocking=True,
+            return_response=True
+        )
+        
+        if not result or entity_id not in result or "items" not in result[entity_id]:
+            return None
+        
+        items = result[entity_id]["items"]
+        
+        for item in items:
+            if item.get("summary") == summary_with_pattern and item.get("status") != "completed":
+                return item
+        
+        return None
+        
+    except Exception as err:
+        LOGGER.error("Error finding duplicate recurring task: %s", err)
+        return None
+
+
 async def create_recurring_task(hass: HomeAssistant, entity_id: str, original_summary: str, 
                                repeat_info: dict[str, Any], original_due_date: datetime,
                                time_string: str = "") -> None:
@@ -714,16 +822,15 @@ async def create_recurring_task(hass: HomeAssistant, entity_id: str, original_su
         time_string: Time component if present
     """
     try:
-        # Calculate next occurrence from TODAY (completion date), not original due date
-        # This ensures that if someone completes a task late, the next occurrence is calculated from now
+        # Calculate next occurrence using completion date and original due date for proper timing logic
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        next_date = schedule_next_occurrence(today, repeat_info)
+        next_date = schedule_next_occurrence(today, original_due_date, repeat_info)
         if not next_date:
             LOGGER.error("Could not calculate next occurrence for recurring task: %s", original_summary)
             return
         
-        LOGGER.debug("Calculated next occurrence from completion date (%s): %s", 
-                    today.strftime('%Y-%m-%d'), next_date.strftime('%Y-%m-%d'))
+        LOGGER.debug("Calculated next occurrence from completion date (%s) and original due (%s): %s", 
+                    today.strftime('%Y-%m-%d'), original_due_date.strftime('%Y-%m-%d'), next_date.strftime('%Y-%m-%d %H:%M'))
         
         # Reconstruct the repeat pattern string
         unit = repeat_info['unit']
@@ -753,30 +860,79 @@ async def create_recurring_task(hass: HomeAssistant, entity_id: str, original_su
         # Create new task summary with repeat pattern
         new_summary = f"{original_summary} {repeat_pattern}".strip()
         
+        # Check for duplicate tasks before creating
+        existing_task = await find_duplicate_recurring_task(hass, entity_id, new_summary)
+        
         # Format next due date
         next_date_str = f'{next_date.year}-{next_date.month:02d}-{next_date.day:02d}'
         
-        # Create the new task
-        add_item_dict = {
-            "entity_id": entity_id,
-            "item": new_summary,
-        }
-        
-        if time_string:
-            add_item_dict["due_datetime"] = f"{next_date_str} {time_string}"
+        if existing_task:
+            # Task already exists, check if due dates differ
+            existing_due = existing_task.get("due", "")
+            new_due_datetime = f"{next_date_str} {time_string}" if time_string else next_date_str
+            
+            if existing_due != new_due_datetime:
+                # Due dates differ, update the existing task with new due date
+                LOGGER.debug("Updating existing recurring task due date: %s from %s to %s", 
+                           new_summary, existing_due, new_due_datetime)
+                
+                update_item_dict = {
+                    "entity_id": entity_id,
+                    "item": new_summary,
+                    "status": existing_task.get("status", "needs_action"),
+                }
+                
+                if time_string:
+                    update_item_dict["due_datetime"] = f"{next_date_str} {time_string}"
+                else:
+                    update_item_dict["due_date"] = next_date_str
+                
+                await hass.services.async_call(
+                    TODO_DOMAIN,
+                    "update_item",
+                    update_item_dict,
+                    blocking=True
+                )
+                
+                LOGGER.info("Updated recurring task due date: %s", new_summary)
+            else:
+                # Same task with same due date already exists, skip creation
+                LOGGER.debug("Recurring task already exists with same due date: %s", new_summary)
         else:
-            add_item_dict["due_date"] = next_date_str
-        
-        LOGGER.debug("Creating recurring task: %s with due date %s", new_summary, next_date_str)
-        
-        await hass.services.async_call(
-            TODO_DOMAIN,
-            "add_item",
-            add_item_dict,
-            blocking=True
-        )
-        
-        LOGGER.info("Created recurring task: %s", new_summary)
+            # No duplicate found, create the new task
+            # Track this as a newly created recurring task to prevent reprocessing
+            task_key = f"{entity_id}:{new_summary}"
+            NEWLY_CREATED_RECURRING_TASKS.add(task_key)
+            
+            add_item_dict = {
+                "entity_id": entity_id,
+                "item": new_summary,
+            }
+            
+            if time_string:
+                add_item_dict["due_datetime"] = f"{next_date_str} {time_string}"
+            else:
+                add_item_dict["due_date"] = next_date_str
+            
+            LOGGER.debug("Creating recurring task: %s with due date %s", new_summary, next_date_str)
+            
+            await hass.services.async_call(
+                TODO_DOMAIN,
+                "add_item",
+                add_item_dict,
+                blocking=True
+            )
+            
+            # Clean up the tracking after a short delay to prevent permanent accumulation
+            # The task should be processed and have its due date set by then
+            import asyncio
+            def cleanup_tracking():
+                NEWLY_CREATED_RECURRING_TASKS.discard(task_key)
+            
+            # Schedule cleanup in 5 seconds
+            hass.loop.call_later(5, cleanup_tracking)
+            
+            LOGGER.info("Created recurring task: %s", new_summary)
         
     except Exception as err:
         LOGGER.error("Error creating recurring task: %s", err)
@@ -809,6 +965,18 @@ async def check_for_completed_recurring_tasks(hass: HomeAssistant, entity_id: st
             
             summary = item.get("summary", "")
             if not summary:
+                continue
+            
+            # Create a unique identifier for this completed task
+            task_uid = item.get("uid", "")
+            if not task_uid:
+                # Fallback to summary + due date as identifier
+                due_date_str = item.get("due", "")
+                task_uid = f"{summary}|{due_date_str}"
+            
+            # Check if we've already processed this completed task
+            task_key = f"{entity_id}:{task_uid}"
+            if task_key in PROCESSED_COMPLETED_ITEMS:
                 continue
             
             # Check if this item has a repeat pattern
@@ -845,12 +1013,17 @@ async def check_for_completed_recurring_tasks(hass: HomeAssistant, entity_id: st
                     # Due datetime format
                     original_due_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
                     time_string = original_due_date.strftime("%H:%M")
+                    # Convert to naive datetime for comparison (remove timezone info)
+                    original_due_date = original_due_date.replace(tzinfo=None)
                 else:
                     # Due date only format
                     original_due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
             except ValueError as date_err:
                 LOGGER.error("Could not parse due date %s: %s", due_date_str, date_err)
                 continue
+            
+            # Mark this task as processed before creating the new one
+            PROCESSED_COMPLETED_ITEMS.add(task_key)
             
             # Extract original summary (without repeat pattern)
             original_summary = summary.replace(repeat_pattern, "").strip()

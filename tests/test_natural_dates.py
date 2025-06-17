@@ -238,7 +238,11 @@ def test_complete_workflow():
         # Add multi-word pattern examples
         "buy food: 1 week",
         "call mom: 2 days",
-        "dentist: 3 months"
+        "dentist: 3 months",
+        # Add repeat pattern examples
+        "take vitamins today [d]",
+        "team meeting tomorrow [w]",
+        "gym workout 5d [w-mwf]"
     ]
     
     for test_case in test_cases:
