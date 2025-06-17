@@ -5,9 +5,9 @@
     "@trolann"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/ludeeus/integration_blueprint",
+  "documentation": "https://github.com/Trolann/todo-magic",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/ludeeus/integration_blueprint/issues",
-  "version": "0.1.1",
+  "issue_tracker": "https://github.com/Trolann/todo-magic/issues",
+  "version": "0.3.0",
   "requirements": []
 }
