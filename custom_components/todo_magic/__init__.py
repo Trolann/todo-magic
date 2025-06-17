@@ -503,7 +503,7 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
             return
         
         # Find items that might need processing
-        # Look for items without due dates that contain date patterns
+        # Look for items without due dates that contain date patterns OR repeat patterns
         candidates = []
         for item in items:
             if "uid" not in item:
@@ -516,18 +516,19 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
             if due:
                 continue
                 
-            # Check if summary contains potential date patterns
+            # Check if summary contains potential date patterns OR repeat patterns
             cleaned_summary = remove_date_prefixes(summary)
             words = cleaned_summary.split()
             
-            # Look for any recognizable date patterns
+            # Look for any recognizable date patterns OR repeat patterns
             has_date_pattern = False
             
             # Check individual words first
             for word in words:
                 if (parse_natural_language_date(word) or 
                     re.match(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', word) or
-                    re.match(r'\d{4}-\d{1,2}-\d{1,2}', word)):
+                    re.match(r'\d{4}-\d{1,2}-\d{1,2}', word) or
+                    parse_repeat_pattern(word)):  # ADD THIS LINE - check for repeat patterns!
                     has_date_pattern = True
                     break
             
@@ -700,7 +701,7 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
 
 
 async def create_recurring_task(hass: HomeAssistant, entity_id: str, original_summary: str, 
-                               repeat_info: dict[str, Any], original_due_date: datetime, 
+                               repeat_info: dict[str, Any], original_due_date: datetime,
                                time_string: str = "") -> None:
     """Create a new instance of a recurring task.
     
