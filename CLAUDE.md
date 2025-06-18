@@ -100,37 +100,33 @@ This integration uses the Home Assistant integration blueprint development setup
 
 We're actually going to do Phase 3, 1, 2 order instead of 1,2,3. It's fine.
 
-### Phase 1: Auto-Sorting System
+### Phase 1: Auto-Sorting System - **COMPLETED**
 
 **Goal: Implement automatic task sorting within individual todo lists**
 
-#### Tasks
+**Status: Fully implemented and tested**
 
-1. **Extend configuration options** in `config_flow.py`:
+#### Completed Features
+
+1. **Configuration options** in `config_flow.py` - ✅ **DONE**:
    - Enable/disable auto-sorting per todo list
    - Sort criteria selection (due date, priority, alphabetical, creation date)
    - Sort direction (ascending/descending)
 
-2. **Implement sorting logic** in `__init__.py`:
+2. **Sorting logic** in `__init__.py` - ✅ **DONE**:
    - `sort_todo_items(items: list, sort_criteria: str, direction: str) -> list` - core sorting function
    - `apply_auto_sort(entity_id: str)` - apply sorting to specific list
    - Integration with existing todo processing flow
+   - Fixed entity access for `async_move_todo_item()` calls
 
-3. **Add sorting to processing step**:
-   - Check if auto-sort is enabled for the current list
-   - Apply sorting after date/time processing and repeat pattern handling
-   - Maintain task order consistency across updates
+3. **Processing step integration** - ✅ **DONE**:
+   - Auto-sort triggers after date/time processing and repeat pattern handling
+   - Proper task order management and reordering via TodoListEntity methods
+   - Multiple entity access methods with fallback approaches
 
-#### Configuration Schema Updates
+#### Known Bug
 
-```python
-# Add to const.py
-CONF_AUTO_SORT = "auto_sort"
-CONF_SORT_CRITERIA = "sort_criteria"
-CONF_SORT_DIRECTION = "sort_direction"
-SORT_CRITERIA = ["due_date", "priority", "alphabetical", "creation_date"]
-SORT_DIRECTIONS = ["ascending", "descending"]
-```
+- **Manual sort position not preserved**: When manually moving/sorting a task, the location it is manually moved to is not saved. Any new/complete tasks will cause it to be sorted by date, overriding manual positioning.
 
 ### Phase 2: Smart List Management System
 

@@ -9,7 +9,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_STATE_CHANGED, Platform
 from homeassistant.core import Event, HomeAssistant, callback
-from homeassistant.components.todo import DOMAIN as TODO_DOMAIN
+from homeassistant.components.todo import DOMAIN as TODO_DOMAIN, TodoListEntity, TodoListEntityFeature, TodoItem
 
 from datetime import datetime, timedelta
 import re
@@ -440,6 +440,290 @@ def remove_date_prefixes(summary: str) -> str:
     return summary
 
 
+def sort_todo_items_by_due_date(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort todo items by due date with earliest due dates first.
+    
+    Items without due dates are placed at the end.
+    Items with the same due date maintain their relative order.
+    
+    Args:
+        items: List of todo item dictionaries
+    
+    Returns:
+        Sorted list of todo items
+    """
+    def get_sort_key(item: dict[str, Any]) -> tuple:
+        """Generate sort key for todo item."""
+        due_str = item.get("due", "")
+        
+        if not due_str:
+            # Items without due dates go to the end
+            return (1, "")
+        
+        try:
+            # Parse due date/time
+            if "T" in due_str:
+                # Due datetime format
+                due_date = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
+                # Convert to naive datetime for comparison
+                due_date = due_date.replace(tzinfo=None)
+            else:
+                # Due date only format
+                due_date = datetime.strptime(due_str, "%Y-%m-%d")
+            
+            # Items with due dates go first, sorted by date
+            return (0, due_date)
+            
+        except (ValueError, TypeError):
+            # Invalid due date format, treat as no due date
+            LOGGER.warning("Invalid due date format for item: %s", due_str)
+            return (1, "")
+    
+    # Sort items using the sort key
+    sorted_items = sorted(items, key=get_sort_key)
+    
+    LOGGER.debug("Sorted %d items by due date", len(sorted_items))
+    return sorted_items
+
+
+async def apply_auto_sort_if_enabled(hass: HomeAssistant, entity_id: str, settings: dict[str, Any]) -> None:
+    """Apply auto-sort to a todo entity if enabled in settings.
+    
+    Args:
+        hass: Home Assistant instance
+        entity_id: Todo entity ID to sort
+        settings: Entity settings dictionary
+    """
+    if not settings.get("auto_sort", False):
+        LOGGER.debug("Auto-sort disabled for %s, skipping", entity_id)
+        return
+    
+    # Check if already processing this entity to prevent race conditions
+    if entity_id in PROCESSING_LOCKS:
+        LOGGER.debug("Already processing %s, skipping auto-sort", entity_id)
+        return
+    
+    try:
+        # Get current items
+        result = await hass.services.async_call(
+            TODO_DOMAIN,
+            "get_items",
+            {"entity_id": entity_id},
+            blocking=True,
+            return_response=True
+        )
+        
+        if not result or entity_id not in result or "items" not in result[entity_id]:
+            LOGGER.debug("No items found for auto-sort: %s", entity_id)
+            return
+        
+        items = result[entity_id]["items"]
+        
+        if len(items) <= 1:
+            LOGGER.debug("Not enough items to sort for %s", entity_id)
+            return
+        
+        # Sort items by due date
+        sorted_items = sort_todo_items_by_due_date(items)
+        
+        # Check if reordering is needed by comparing current vs sorted order
+        current_order = [item.get("summary", "") for item in items]
+        sorted_order = [item.get("summary", "") for item in sorted_items]
+        
+        if current_order == sorted_order:
+            LOGGER.debug("Items already in correct order for %s", entity_id)
+            return
+        
+        LOGGER.debug("Reordering items for %s: %s -> %s", entity_id, current_order, sorted_order)
+        
+        # TODO: Manual move detection placeholder
+        # Future enhancement: detect if user manually moved items and add "pin" functionality
+        # to prevent auto-sorting of manually positioned items
+        
+        # Use Home Assistant's move_item service for smooth reordering (no UI flicker)
+        LOGGER.info("Auto-sort will reorder %s from %s to %s", 
+                   entity_id, current_order, sorted_order)
+        
+        try:
+            # Build a mapping of current items by UID for efficient lookups
+            current_items_by_uid = {item.get("uid"): item for item in items if item.get("uid")}
+            sorted_uids = [item.get("uid") for item in sorted_items if item.get("uid")]
+            current_uids = [item.get("uid") for item in items if item.get("uid")]
+            
+            LOGGER.debug("Current UIDs: %s", current_uids)
+            LOGGER.debug("Sorted UIDs: %s", sorted_uids)
+            
+            # Check if we have UIDs for all items
+            if len(sorted_uids) != len(sorted_items):
+                LOGGER.warning("Some items missing UIDs, falling back to summary-based reordering")
+                # Fallback: use item summary to identify items for move_item service
+                # Note: This is less reliable than UIDs but may still work
+                
+            # Reorder items using move_item service
+            moves_made = 0
+            previous_uid = None  # First item goes to position 1 (previous_uid=None)
+            
+            for i, target_item in enumerate(sorted_items):
+                target_uid = target_item.get("uid")
+                target_summary = target_item.get("summary", "")
+                
+                if not target_uid and not target_summary:
+                    LOGGER.warning("Item has no UID or summary, skipping")
+                    continue
+                
+                # Check if this item is already in the correct position
+                current_position = None
+                if target_uid and target_uid in current_uids:
+                    current_position = current_uids.index(target_uid)
+                
+                if current_position == i:
+                    # Item is already in correct position
+                    LOGGER.debug("Item '%s' already in correct position %d", target_summary, i)
+                    previous_uid = target_uid
+                    continue
+                
+                # Item needs to be moved
+                LOGGER.debug("Moving item '%s' to position %d (after UID: %s)", 
+                           target_summary, i, previous_uid)
+                
+                try:
+                    # Try multiple methods to get the actual entity object
+                    actual_entity = None
+                    
+                    # Method 1: Try to get from entity platform
+                    try:
+                        from homeassistant.helpers import entity_platform
+                        platforms = hass.data.get("entity_platform", {})
+                        if TODO_DOMAIN in platforms:
+                            for platform in platforms[TODO_DOMAIN]:
+                                for entity in platform.entities:
+                                    if entity.entity_id == entity_id:
+                                        actual_entity = entity
+                                        break
+                                if actual_entity:
+                                    break
+                    except Exception as e:
+                        LOGGER.debug("Method 1 failed: %s", e)
+                    
+                    # Method 2: Try accessing via domain data
+                    if not actual_entity:
+                        try:
+                            domain_data = hass.data.get(TODO_DOMAIN, {})
+                            if isinstance(domain_data, dict):
+                                for key, value in domain_data.items():
+                                    if hasattr(value, 'entity_id') and value.entity_id == entity_id:
+                                        actual_entity = value
+                                        break
+                        except Exception as e:
+                            LOGGER.debug("Method 2 failed: %s", e)
+                    
+                    # Method 3: Try the entity registry approach
+                    if not actual_entity:
+                        try:
+                            from homeassistant.helpers import entity_registry as er
+                            registry = er.async_get(hass)
+                            entity_entry = registry.async_get(entity_id)
+                            if entity_entry:
+                                # Try to find the actual entity through the entity component
+                                entity_component = hass.data.get("entity_components", {}).get(TODO_DOMAIN)
+                                if entity_component:
+                                    actual_entity = entity_component.get_entity(entity_id)
+                        except Exception as e:
+                            LOGGER.debug("Method 3 failed: %s", e)
+                    
+                    # Method 4: Fallback to service call if direct entity access fails
+                    if not actual_entity:
+                        try:
+                            LOGGER.debug("Trying service call approach as fallback for %s", entity_id)
+                            await hass.services.async_call(
+                                TODO_DOMAIN,
+                                "move_item",
+                                {
+                                    "entity_id": entity_id,
+                                    "uid": target_uid,
+                                    "previous_uid": previous_uid
+                                }
+                            )
+                            moves_made += 1
+                            LOGGER.debug("Successfully moved item '%s' via service call", target_summary)
+                            
+                            # Update our tracking of current order
+                            if target_uid and target_uid in current_uids:
+                                current_uids.remove(target_uid)
+                                current_uids.insert(i, target_uid)
+                            previous_uid = target_uid
+                            continue
+                            
+                        except Exception as service_error:
+                            LOGGER.error("Could not move todo item %s via service call: %s", target_summary, service_error)
+                            LOGGER.error("Could not access todo entity %s using any method", entity_id)
+                            continue
+                    
+                    # Check if the entity supports MOVE_TODO_ITEM
+                    if not hasattr(actual_entity, 'supported_features') or \
+                       not (actual_entity.supported_features & TodoListEntityFeature.MOVE_TODO_ITEM):
+                        LOGGER.warning("Entity %s does not support MOVE_TODO_ITEM feature", entity_id)
+                        break
+                    
+                    LOGGER.debug("Successfully found entity %s, calling async_move_todo_item", entity_id)
+                    
+                    # Call the move method directly on the entity
+                    await actual_entity.async_move_todo_item(
+                        uid=target_uid,
+                        previous_uid=previous_uid
+                    )
+                    
+                    moves_made += 1
+                    LOGGER.debug("Successfully moved item '%s'", target_summary)
+                    
+                    # Update our tracking of current order
+                    if target_uid and target_uid in current_uids:
+                        current_uids.remove(target_uid)
+                        current_uids.insert(i, target_uid)
+                    
+                except Exception as move_err:
+                    LOGGER.error("Failed to move item '%s': %s", target_summary, move_err)
+                    # Check if move_todo_item service doesn't exist
+                    if "not found" in str(move_err).lower() or "Unknown service" in str(move_err):
+                        LOGGER.warning("move_todo_item service not available, todo provider may not support reordering")
+                        break
+                    # Continue with other items even if one fails
+                
+                previous_uid = target_uid
+            
+            LOGGER.info("Auto-sort completed: made %d moves for %s", moves_made, entity_id)
+            
+        except Exception as reorder_err:
+            LOGGER.error("Error during auto-sort reordering for %s: %s", entity_id, reorder_err)
+            
+            # If move_item service fails completely, we could fall back to remove/re-add
+            # But for now, we'll just log the error and continue
+            if "Unknown service" in str(reorder_err) or "not found" in str(reorder_err).lower():
+                LOGGER.warning("move_item service not supported by this todo provider")
+            else:
+                LOGGER.warning("Auto-sort reordering failed, items remain in original order")
+        
+        LOGGER.info("Auto-sorted %d items for %s", len(sorted_items), entity_id)
+        
+    except Exception as err:
+        LOGGER.error("Error during auto-sort for %s: %s", entity_id, err)
+
+
+async def apply_auto_sort_after_delay(hass: HomeAssistant, entity_id: str, settings: dict[str, Any]) -> None:
+    """Apply auto-sort after a short delay to allow other processing to complete.
+    
+    Args:
+        hass: Home Assistant instance
+        entity_id: Todo entity ID to sort
+        settings: Entity settings dictionary
+    """
+    import asyncio
+    LOGGER.debug("Auto-sort delayed execution starting for %s", entity_id)
+    # Wait a short time to allow other processing to complete
+    await asyncio.sleep(1)
+    await apply_auto_sort_if_enabled(hass, entity_id, settings)
+
+
 def get_entity_settings(options: dict[str, Any], entity_id: str) -> dict[str, Any]:
     """Get settings for a specific entity from options."""
     entity_key = entity_id.replace(".", "_")
@@ -523,6 +807,14 @@ def state_changed_listener(hass: HomeAssistant, entry: ConfigEntry, evt: Event) 
         hass.async_create_background_task(
             check_for_completed_recurring_tasks(hass, entity_id, settings),
             name=f"todo_magic_recurring_{entity_id}"
+        )
+    
+    # Create separate background task for auto-sort to run after other processing
+    if settings.get("auto_sort", False):
+        LOGGER.debug("Triggering auto-sort for %s after state change", entity_id)
+        hass.async_create_background_task(
+            apply_auto_sort_after_delay(hass, entity_id, settings),
+            name=f"todo_magic_auto_sort_{entity_id}"
         )
 
 
@@ -761,6 +1053,10 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
             # Log repeat info for debugging
             if repeat_info and settings.get("process_recurring", False):
                 LOGGER.debug("Task with repeat pattern processed: %s with pattern %s", new_summary, repeat_info)
+            
+            # Apply auto-sort if enabled
+            LOGGER.debug("Triggering auto-sort for %s after processing new item", entity_id)
+            await apply_auto_sort_if_enabled(hass, entity_id, settings)
         else:
             LOGGER.debug("No date could be determined for item: %s", summary)
 
@@ -933,6 +1229,12 @@ async def create_recurring_task(hass: HomeAssistant, entity_id: str, original_su
             hass.loop.call_later(5, cleanup_tracking)
             
             LOGGER.info("Created recurring task: %s", new_summary)
+        
+        # Apply auto-sort after creating recurring task
+        # Need to get settings for this entity
+        from homeassistant.config_entries import ConfigEntry
+        # Note: We need access to the config entry to get settings, but it's not passed to this function
+        # For now, we'll skip auto-sort in recurring task creation and rely on state change listener
         
     except Exception as err:
         LOGGER.error("Error creating recurring task: %s", err)
