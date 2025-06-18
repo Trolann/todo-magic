@@ -9,12 +9,20 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_STATE_CHANGED, Platform
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import event as event_helper
 from homeassistant.components.todo import DOMAIN as TODO_DOMAIN, TodoListEntity, TodoListEntityFeature, TodoItem
 
 from datetime import datetime, timedelta
 import re
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    CONF_DAILY_LIST,
+    CONF_WEEKLY_LIST,
+    CONF_MONTHLY_LIST,
+    CONF_FALLBACK_LIST,
+    CONF_ENABLE_SMART_LISTS,
+)
 
 LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.TODO]
@@ -440,6 +448,319 @@ def remove_date_prefixes(summary: str) -> str:
     return summary
 
 
+def analyze_task_timeframe(due_date: datetime) -> str:
+    """Categorize tasks by timeframe.
+    
+    Args:
+        due_date: The due date of the task
+    
+    Returns:
+        'today', 'this_week', 'this_month', or 'other'
+    """
+    now = datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Strip time from due_date for comparison
+    due_date_only = due_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Check if due today
+    if due_date_only == today:
+        return 'today'
+    
+    # Check if due this week (Sunday to Saturday)
+    # Find the start of this week (Sunday)
+    days_since_sunday = (today.weekday() + 1) % 7  # Monday=0, so Sunday=6 -> 0
+    week_start = today - timedelta(days=days_since_sunday)
+    week_end = week_start + timedelta(days=6)
+    
+    if week_start <= due_date_only <= week_end:
+        return 'this_week'
+    
+    # Check if due this month (but not this week)
+    if due_date_only.month == today.month and due_date_only.year == today.year:
+        return 'this_month'
+    
+    return 'other'
+
+
+def get_smart_list_for_timeframe(timeframe: str, smart_list_config: dict[str, Any]) -> str | None:
+    """Return the appropriate smart list entity_id for a given timeframe.
+    
+    Args:
+        timeframe: 'today', 'this_week', 'this_month', or 'other'
+        smart_list_config: Smart list configuration dictionary
+    
+    Returns:
+        Entity ID of the appropriate smart list or None if no match
+    """
+    if not smart_list_config.get(CONF_ENABLE_SMART_LISTS, False):
+        return None
+    
+    if timeframe == 'today':
+        return smart_list_config.get(CONF_DAILY_LIST) or None
+    elif timeframe == 'this_week':
+        return smart_list_config.get(CONF_WEEKLY_LIST) or None
+    elif timeframe == 'this_month':
+        return smart_list_config.get(CONF_MONTHLY_LIST) or None
+    
+    return None
+
+
+def get_smart_list_settings(options: dict[str, Any]) -> dict[str, Any]:
+    """Extract smart list settings from options.
+    
+    Args:
+        options: Configuration options dictionary
+    
+    Returns:
+        Smart list configuration dictionary
+    """
+    return {
+        CONF_ENABLE_SMART_LISTS: options.get(CONF_ENABLE_SMART_LISTS, False),
+        CONF_DAILY_LIST: options.get(CONF_DAILY_LIST, ""),
+        CONF_WEEKLY_LIST: options.get(CONF_WEEKLY_LIST, ""),
+        CONF_MONTHLY_LIST: options.get(CONF_MONTHLY_LIST, ""),
+        CONF_FALLBACK_LIST: options.get(CONF_FALLBACK_LIST, ""),
+    }
+
+
+async def replicate_task_to_smart_lists(hass: HomeAssistant, item: dict[str, Any], 
+                                       source_entity_id: str, smart_config: dict[str, Any]) -> None:
+    """Replicate a task to appropriate smart lists based on due date.
+    
+    Args:
+        hass: Home Assistant instance
+        item: Task item dictionary
+        source_entity_id: Entity ID where the task was created
+        smart_config: Smart list configuration
+    """
+    if not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        return
+    
+    due_date_str = item.get("due", "")
+    if not due_date_str:
+        return
+    
+    try:
+        # Parse due date
+        if "T" in due_date_str:
+            due_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
+            due_date = due_date.replace(tzinfo=None)
+        else:
+            due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
+        
+        # Determine timeframe
+        timeframe = analyze_task_timeframe(due_date)
+        target_list = get_smart_list_for_timeframe(timeframe, smart_config)
+        
+        if not target_list or target_list == source_entity_id:
+            # No smart list for this timeframe or task is already in the right list
+            return
+        
+        # Check if task already exists in target list to avoid duplicates
+        existing_task = await find_task_in_list(hass, target_list, item.get("summary", ""), due_date_str)
+        if existing_task:
+            LOGGER.debug("Task already exists in target smart list %s: %s", target_list, item.get("summary"))
+            return
+        
+        # Replicate task to target smart list
+        summary = item.get("summary", "")
+        add_item_dict = {
+            "entity_id": target_list,
+            "item": summary,
+        }
+        
+        if "T" in due_date_str:
+            add_item_dict["due_datetime"] = due_date_str
+        else:
+            add_item_dict["due_date"] = due_date_str
+        
+        LOGGER.debug("Replicating task to smart list %s: %s", target_list, summary)
+        
+        await hass.services.async_call(
+            TODO_DOMAIN,
+            "add_item",
+            add_item_dict,
+            blocking=True
+        )
+        
+        LOGGER.info("Replicated task to smart list %s: %s", target_list, summary)
+        
+    except Exception as err:
+        LOGGER.error("Error replicating task to smart lists: %s", err)
+
+
+async def move_task_to_correct_list(hass: HomeAssistant, item: dict[str, Any], 
+                                   current_entity_id: str, smart_config: dict[str, Any]) -> None:
+    """Move a task to the correct list if it's in the wrong smart list.
+    
+    Args:
+        hass: Home Assistant instance
+        item: Task item dictionary
+        current_entity_id: Current entity ID where the task is located
+        smart_config: Smart list configuration
+    """
+    if not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        return
+    
+    due_date_str = item.get("due", "")
+    if not due_date_str:
+        return
+    
+    try:
+        # Parse due date
+        if "T" in due_date_str:
+            due_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
+            due_date = due_date.replace(tzinfo=None)
+        else:
+            due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
+        
+        # Determine correct timeframe and target list
+        timeframe = analyze_task_timeframe(due_date)
+        correct_list = get_smart_list_for_timeframe(timeframe, smart_config)
+        
+        # If no smart list for this timeframe, use fallback
+        if not correct_list:
+            correct_list = smart_config.get(CONF_FALLBACK_LIST, "")
+        
+        if not correct_list or correct_list == current_entity_id:
+            # Task is already in the correct list
+            return
+        
+        # Check if current list is a smart list
+        all_smart_lists = [
+            smart_config.get(CONF_DAILY_LIST, ""),
+            smart_config.get(CONF_WEEKLY_LIST, ""),
+            smart_config.get(CONF_MONTHLY_LIST, "")
+        ]
+        
+        if current_entity_id not in all_smart_lists:
+            # Task is not in a smart list, don't move it
+            return
+        
+        # Move task from current smart list to correct list
+        summary = item.get("summary", "")
+        
+        # First, add to correct list
+        add_item_dict = {
+            "entity_id": correct_list,
+            "item": summary,
+        }
+        
+        if "T" in due_date_str:
+            add_item_dict["due_datetime"] = due_date_str
+        else:
+            add_item_dict["due_date"] = due_date_str
+        
+        await hass.services.async_call(
+            TODO_DOMAIN,
+            "add_item",
+            add_item_dict,
+            blocking=True
+        )
+        
+        # Then remove from current list
+        await hass.services.async_call(
+            TODO_DOMAIN,
+            "remove_item",
+            {
+                "entity_id": current_entity_id,
+                "item": summary
+            },
+            blocking=True
+        )
+        
+        LOGGER.info("Moved task from %s to %s: %s", current_entity_id, correct_list, summary)
+        
+    except Exception as err:
+        LOGGER.error("Error moving task to correct list: %s", err)
+
+
+async def find_task_in_list(hass: HomeAssistant, entity_id: str, summary: str, due_date: str) -> dict[str, Any] | None:
+    """Find a task with matching summary and due date in a specific list.
+    
+    Args:
+        hass: Home Assistant instance
+        entity_id: Todo entity ID to search
+        summary: Task summary to match
+        due_date: Due date to match
+    
+    Returns:
+        Task dictionary if found, None otherwise
+    """
+    try:
+        result = await hass.services.async_call(
+            TODO_DOMAIN,
+            "get_items",
+            {"entity_id": entity_id},
+            blocking=True,
+            return_response=True
+        )
+        
+        if not result or entity_id not in result or "items" not in result[entity_id]:
+            return None
+        
+        items = result[entity_id]["items"]
+        
+        for item in items:
+            if (item.get("summary") == summary and 
+                item.get("due") == due_date and 
+                item.get("status") != "completed"):
+                return item
+        
+        return None
+        
+    except Exception as err:
+        LOGGER.error("Error finding task in list %s: %s", entity_id, err)
+        return None
+
+
+async def sync_task_completion_across_lists(hass: HomeAssistant, completed_item: dict[str, Any], 
+                                          source_entity_id: str, smart_config: dict[str, Any]) -> None:
+    """Mark a task as completed in all lists where it exists.
+    
+    Args:
+        hass: Home Assistant instance
+        completed_item: The completed task item
+        source_entity_id: Entity ID where the task was completed
+        smart_config: Smart list configuration
+    """
+    if not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        return
+    
+    summary = completed_item.get("summary", "")
+    due_date = completed_item.get("due", "")
+    
+    if not summary:
+        return
+    
+    # Get all smart lists and fallback list
+    lists_to_check = []
+    for list_key in [CONF_DAILY_LIST, CONF_WEEKLY_LIST, CONF_MONTHLY_LIST, CONF_FALLBACK_LIST]:
+        list_id = smart_config.get(list_key, "")
+        if list_id and list_id != source_entity_id:
+            lists_to_check.append(list_id)
+    
+    # Find and complete the task in other lists
+    for entity_id in lists_to_check:
+        try:
+            matching_task = await find_task_in_list(hass, entity_id, summary, due_date)
+            if matching_task and matching_task.get("status") != "completed":
+                await hass.services.async_call(
+                    TODO_DOMAIN,
+                    "update_item",
+                    {
+                        "entity_id": entity_id,
+                        "item": summary,
+                        "status": "completed"
+                    },
+                    blocking=True
+                )
+                LOGGER.info("Synced task completion to %s: %s", entity_id, summary)
+        except Exception as err:
+            LOGGER.error("Error syncing task completion to %s: %s", entity_id, err)
+
+
 def sort_todo_items_by_due_date(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort todo items by due date with earliest due dates first.
     
@@ -750,9 +1071,10 @@ def state_changed_listener(hass: HomeAssistant, entry: ConfigEntry, evt: Event) 
 
     # Get settings for this entity
     settings = get_entity_settings(entry.options, entity_id)
+    smart_config = get_smart_list_settings(entry.options)
     
-    # Skip processing if auto_due_parsing is disabled for this entity
-    if not settings["auto_due_parsing"]:
+    # Skip processing if auto_due_parsing is disabled for this entity and smart lists are disabled
+    if not settings["auto_due_parsing"] and not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
         return
 
     # Debug: Log the state change details
@@ -796,9 +1118,9 @@ def state_changed_listener(hass: HomeAssistant, entry: ConfigEntry, evt: Event) 
     
     LOGGER.debug("New item detected for %s (count: %d -> %d)", entity_id, old_count, new_count)
 
-    # Create background task to process the new item
+    # Create background task to process the new item (includes smart list processing)
     hass.async_create_background_task(
-        process_new_todo_item(hass, entity_id, settings),
+        process_new_todo_item(hass, entity_id, settings, smart_config),
         name=f"todo_magic_new_item_{entity_id}"
     )
     
@@ -809,12 +1131,29 @@ def state_changed_listener(hass: HomeAssistant, entry: ConfigEntry, evt: Event) 
             name=f"todo_magic_recurring_{entity_id}"
         )
     
+    # Check for completed tasks that need to be synced across smart lists
+    if smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        hass.async_create_background_task(
+            process_smart_list_task_completion(hass, entity_id, smart_config),
+            name=f"todo_magic_smart_completion_{entity_id}"
+        )
+    
     # Create separate background task for auto-sort to run after other processing
     if settings.get("auto_sort", False):
         LOGGER.debug("Triggering auto-sort for %s after state change", entity_id)
         hass.async_create_background_task(
             apply_auto_sort_after_delay(hass, entity_id, settings),
             name=f"todo_magic_auto_sort_{entity_id}"
+        )
+    
+    # Create background task for immediate auto-clear if enabled (clear_days = 0)
+    clear_days = settings.get("clear_days", -1)
+    LOGGER.debug("Auto-clear settings for %s: clear_days=%s, all_settings=%s", entity_id, clear_days, settings)
+    if clear_days == 0:
+        LOGGER.debug("Triggering immediate auto-clear for %s after state change", entity_id)
+        hass.async_create_background_task(
+            clear_completed_tasks_if_enabled(hass, entity_id, settings),
+            name=f"todo_magic_auto_clear_{entity_id}"
         )
 
 
@@ -827,7 +1166,7 @@ async def options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> No
 
 
 
-async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: dict[str, Any]) -> None:
+async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: dict[str, Any], smart_config: dict[str, Any] | None = None) -> None:
     """Process the newest todo item for the given entity."""
     # Add processing lock
     if entity_id in PROCESSING_LOCKS:
@@ -1057,6 +1396,31 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
             # Apply auto-sort if enabled
             LOGGER.debug("Triggering auto-sort for %s after processing new item", entity_id)
             await apply_auto_sort_if_enabled(hass, entity_id, settings)
+            
+            # Process smart list logic if enabled
+            if smart_config and smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+                # Get the updated item after processing to include due date
+                try:
+                    result = await hass.services.async_call(
+                        TODO_DOMAIN,
+                        "get_items",
+                        {"entity_id": entity_id},
+                        blocking=True,
+                        return_response=True
+                    )
+                    
+                    if result and entity_id in result and "items" in result[entity_id]:
+                        items = result[entity_id]["items"]
+                        # Find the item we just processed
+                        for item in items:
+                            if item.get("summary") == new_summary and item.get("due"):
+                                # Replicate to appropriate smart lists
+                                await replicate_task_to_smart_lists(hass, item, entity_id, smart_config)
+                                # Check if this task needs to be moved (if it's in wrong smart list)
+                                await move_task_to_correct_list(hass, item, entity_id, smart_config)
+                                break
+                except Exception as smart_err:
+                    LOGGER.error("Error processing smart list logic: %s", smart_err)
         else:
             LOGGER.debug("No date could be determined for item: %s", summary)
 
@@ -1065,6 +1429,167 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
     finally:
         # Always remove the processing lock
         PROCESSING_LOCKS.discard(entity_id)
+
+
+async def process_smart_list_task_completion(hass: HomeAssistant, entity_id: str, smart_config: dict[str, Any]) -> None:
+    """Process task completions for smart list synchronization."""
+    if not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        return
+    
+    try:
+        # Get all items including completed ones
+        result = await hass.services.async_call(
+            TODO_DOMAIN,
+            "get_items",
+            {"entity_id": entity_id},
+            blocking=True,
+            return_response=True
+        )
+        
+        if not result or entity_id not in result or "items" not in result[entity_id]:
+            return
+        
+        items = result[entity_id]["items"]
+        
+        # Look for recently completed items that haven't been synced
+        for item in items:
+            if item.get("status") == "completed":
+                summary = item.get("summary", "")
+                due_date = item.get("due", "")
+                
+                if summary and due_date:
+                    # Sync completion across other smart lists
+                    await sync_task_completion_across_lists(hass, item, entity_id, smart_config)
+    
+    except Exception as err:
+        LOGGER.error("Error processing smart list task completion: %s", err)
+
+
+async def cleanup_completed_tasks_for_smart_list(hass: HomeAssistant, entity_id: str, 
+                                               list_type: str) -> None:
+    """Clean up completed tasks for a smart list based on its type.
+    
+    Args:
+        hass: Home Assistant instance
+        entity_id: Smart list entity ID
+        list_type: 'daily', 'weekly', or 'monthly'
+    """
+    try:
+        result = await hass.services.async_call(
+            TODO_DOMAIN,
+            "get_items",
+            {"entity_id": entity_id},
+            blocking=True,
+            return_response=True
+        )
+        
+        if not result or entity_id not in result or "items" not in result[entity_id]:
+            return
+        
+        items = result[entity_id]["items"]
+        now = datetime.now()
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        for item in items:
+            if item.get("status") != "completed":
+                continue
+            
+            summary = item.get("summary", "")
+            due_date_str = item.get("due", "")
+            
+            if not summary or not due_date_str:
+                continue
+            
+            try:
+                # Parse due date
+                if "T" in due_date_str:
+                    due_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
+                    due_date = due_date.replace(tzinfo=None)
+                else:
+                    due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
+                
+                due_date_only = due_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                should_remove = False
+                
+                # Determine if task should be removed based on list type and overdue status
+                if list_type == "daily":
+                    # Daily: remove completed tasks that are not from today, but keep overdue tasks
+                    if due_date_only < today and item.get("status") == "completed":
+                        should_remove = True
+                elif list_type == "weekly":
+                    # Weekly: remove completed tasks from previous weeks, but keep overdue tasks
+                    days_since_sunday = (today.weekday() + 1) % 7
+                    week_start = today - timedelta(days=days_since_sunday)
+                    if due_date_only < week_start and item.get("status") == "completed":
+                        should_remove = True
+                elif list_type == "monthly":
+                    # Monthly: remove completed tasks from previous months, but keep overdue tasks
+                    month_start = today.replace(day=1)
+                    if due_date_only < month_start and item.get("status") == "completed":
+                        should_remove = True
+                
+                if should_remove:
+                    await hass.services.async_call(
+                        TODO_DOMAIN,
+                        "remove_item",
+                        {
+                            "entity_id": entity_id,
+                            "item": summary
+                        },
+                        blocking=True
+                    )
+                    LOGGER.info("Auto-cleared completed task from %s smart list: %s", list_type, summary)
+                    
+            except Exception as item_err:
+                LOGGER.error("Error processing item %s for cleanup: %s", summary, item_err)
+    
+    except Exception as err:
+        LOGGER.error("Error cleaning up completed tasks for %s: %s", entity_id, err)
+
+
+async def schedule_smart_list_cleanup(hass: HomeAssistant, smart_config: dict[str, Any]) -> None:
+    """Schedule cleanup for all configured smart lists."""
+    if not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        return
+    
+    # Schedule cleanup for each smart list type
+    daily_list = smart_config.get(CONF_DAILY_LIST, "")
+    weekly_list = smart_config.get(CONF_WEEKLY_LIST, "")
+    monthly_list = smart_config.get(CONF_MONTHLY_LIST, "")
+    
+    if daily_list:
+        await cleanup_completed_tasks_for_smart_list(hass, daily_list, "daily")
+    
+    if weekly_list:
+        await cleanup_completed_tasks_for_smart_list(hass, weekly_list, "weekly")
+    
+    if monthly_list:
+        await cleanup_completed_tasks_for_smart_list(hass, monthly_list, "monthly")
+
+
+def schedule_next_cleanup(hass: HomeAssistant, smart_config: dict[str, Any]) -> None:
+    """Schedule the next cleanup at the appropriate time."""
+    if not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        return
+    
+    now = datetime.now()
+    
+    # Calculate next cleanup time (every day at midnight)
+    next_cleanup = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    delay_seconds = (next_cleanup - now).total_seconds()
+    
+    LOGGER.debug("Scheduling next smart list cleanup in %d seconds", delay_seconds)
+    
+    def cleanup_callback():
+        """Callback to run cleanup and schedule next one."""
+        hass.async_create_background_task(
+            schedule_smart_list_cleanup(hass, smart_config),
+            name="todo_magic_smart_list_cleanup"
+        )
+        # Schedule the next cleanup
+        schedule_next_cleanup(hass, smart_config)
+    
+    hass.loop.call_later(delay_seconds, cleanup_callback)
 
 
 async def find_duplicate_recurring_task(hass: HomeAssistant, entity_id: str, 
@@ -1357,6 +1882,283 @@ async def check_for_completed_recurring_tasks(hass: HomeAssistant, entity_id: st
         LOGGER.error("Error checking for completed recurring tasks: %s", err)
 
 
+def should_clear_completed_task(item: dict[str, Any], clear_days: int) -> bool:
+    """Determine if a completed task should be cleared based on age.
+    
+    Args:
+        item: Task item dictionary
+        clear_days: Number of days to keep completed tasks (-1 = disabled, 0+ = enabled)
+    
+    Returns:
+        True if task should be cleared, False otherwise
+    """
+    if clear_days < 0:
+        # Auto-clear disabled
+        return False
+    
+    if item.get("status") != "completed":
+        # Only clear completed tasks
+        return False
+    
+    # Get completion date if available, otherwise use due date as fallback
+    due_date_str = item.get("due", "")
+    if not due_date_str:
+        # No date information available
+        if clear_days == 0:
+            # For immediate clearing, clear all completed tasks regardless of due date
+            return True
+        else:
+            # For time-based clearing, can't determine age without date
+            return False
+    
+    # For immediate clearing, clear all completed tasks regardless of due date
+    if clear_days == 0:
+        return True
+    
+    try:
+        # Parse the due date
+        if "T" in due_date_str:
+            task_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
+            task_date = task_date.replace(tzinfo=None)
+        else:
+            task_date = datetime.strptime(due_date_str, "%Y-%m-%d")
+        
+        task_date_only = task_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Calculate age in days
+        age_days = (today - task_date_only).days
+        
+        # Clear if task is older than the configured number of days
+        return age_days > clear_days
+        
+    except (ValueError, TypeError) as err:
+        LOGGER.warning("Could not parse date for completed task: %s - %s", due_date_str, err)
+        return False
+
+
+async def clear_completed_tasks_if_enabled(hass: HomeAssistant, entity_id: str, settings: dict[str, Any]) -> None:
+    """Clear completed tasks for an entity if auto-clear is enabled.
+    
+    Args:
+        hass: Home Assistant instance
+        entity_id: Todo entity ID
+        settings: Entity settings dictionary
+    """
+    clear_days = settings.get("clear_days", -1)
+    if clear_days < 0:
+        # Auto-clear disabled for this entity
+        return
+    
+    try:
+        # Get all items from the todo list
+        result = await hass.services.async_call(
+            TODO_DOMAIN,
+            "get_items",
+            {"entity_id": entity_id},
+            blocking=True,
+            return_response=True
+        )
+        
+        if not result or entity_id not in result or "items" not in result[entity_id]:
+            LOGGER.debug("No items found for auto-clear: %s", entity_id)
+            return
+        
+        items = result[entity_id]["items"]
+        
+        # Find completed tasks that should be cleared
+        tasks_to_clear = []
+        for item in items:
+            LOGGER.debug("Checking item for clearing: %s, status=%s, due=%s", 
+                        item.get("summary"), item.get("status"), item.get("due"))
+            should_clear = should_clear_completed_task(item, clear_days)
+            LOGGER.debug("Should clear result: %s", should_clear)
+            if should_clear:
+                tasks_to_clear.append(item)
+        
+        if not tasks_to_clear:
+            LOGGER.debug("No completed tasks to clear for %s (found %d completed items)", entity_id, 
+                        len([item for item in items if item.get("status") == "completed"]))
+            return
+        
+        LOGGER.debug("Found %d completed tasks to clear for %s", len(tasks_to_clear), entity_id)
+        
+        # First try bulk removal using remove_completed_items service
+        try:
+            await hass.services.async_call(
+                TODO_DOMAIN,
+                "remove_completed_items",
+                {"entity_id": entity_id},
+                blocking=True
+            )
+            
+            # Check if this cleared all the tasks we wanted to clear
+            # Note: This service removes ALL completed items, not just old ones
+            # So we need to re-add any completed items that shouldn't be cleared yet
+            
+            # Get remaining items after bulk clear
+            result_after = await hass.services.async_call(
+                TODO_DOMAIN,
+                "get_items",
+                {"entity_id": entity_id},
+                blocking=True,
+                return_response=True
+            )
+            
+            if result_after and entity_id in result_after and "items" in result_after[entity_id]:
+                remaining_items = result_after[entity_id]["items"]
+                
+                # Find completed tasks that were cleared but shouldn't have been
+                for item in items:
+                    if (item.get("status") == "completed" and 
+                        not should_clear_completed_task(item, clear_days) and
+                        not any(remaining.get("summary") == item.get("summary") and 
+                               remaining.get("due") == item.get("due") 
+                               for remaining in remaining_items)):
+                        
+                        # Re-add the task that was cleared but shouldn't have been
+                        try:
+                            add_item_dict = {
+                                "entity_id": entity_id,
+                                "item": item.get("summary", ""),
+                            }
+                            
+                            due_date_str = item.get("due", "")
+                            if due_date_str:
+                                if "T" in due_date_str:
+                                    add_item_dict["due_datetime"] = due_date_str
+                                else:
+                                    add_item_dict["due_date"] = due_date_str
+                            
+                            await hass.services.async_call(
+                                TODO_DOMAIN,
+                                "add_item",
+                                add_item_dict,
+                                blocking=True
+                            )
+                            
+                            # Mark it as completed again
+                            await hass.services.async_call(
+                                TODO_DOMAIN,
+                                "update_item",
+                                {
+                                    "entity_id": entity_id,
+                                    "item": item.get("summary", ""),
+                                    "status": "completed"
+                                },
+                                blocking=True
+                            )
+                            
+                            LOGGER.debug("Re-added completed task that shouldn't have been cleared: %s", 
+                                       item.get("summary"))
+                            
+                        except Exception as readd_err:
+                            LOGGER.error("Error re-adding completed task: %s", readd_err)
+            
+            LOGGER.info("Auto-cleared completed tasks for %s using bulk removal", entity_id)
+            
+        except Exception as bulk_err:
+            LOGGER.debug("Bulk removal failed for %s, trying individual removal: %s", entity_id, bulk_err)
+            
+            # Fall back to individual item removal
+            cleared_count = 0
+            for item in tasks_to_clear:
+                summary = item.get("summary", "")
+                if not summary:
+                    continue
+                
+                try:
+                    await hass.services.async_call(
+                        TODO_DOMAIN,
+                        "remove_item",
+                        {
+                            "entity_id": entity_id,
+                            "item": summary
+                        },
+                        blocking=True
+                    )
+                    cleared_count += 1
+                    LOGGER.debug("Cleared completed task: %s", summary)
+                    
+                except Exception as item_err:
+                    LOGGER.warning("Could not clear completed task '%s': %s", summary, item_err)
+            
+            if cleared_count > 0:
+                LOGGER.info("Auto-cleared %d completed tasks for %s using individual removal", 
+                           cleared_count, entity_id)
+    
+    except Exception as err:
+        LOGGER.error("Error during auto-clear for %s: %s", entity_id, err)
+
+
+async def run_auto_clear_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Run auto-clear check for all configured entities.
+    
+    Args:
+        hass: Home Assistant instance
+        entry: Config entry with entity settings
+    """
+    LOGGER.debug("Running daily auto-clear check")
+    
+    # Get all todo entities
+    todo_entity_ids = [eid for eid in hass.states.async_entity_ids(TODO_DOMAIN)
+                      if hass.states.get(eid) and hass.states.get(eid).state != "unavailable"]
+    
+    if not todo_entity_ids:
+        LOGGER.debug("No todo entities found for auto-clear check")
+        return
+    
+    # Check each entity for auto-clear settings
+    cleared_entities = []
+    for entity_id in todo_entity_ids:
+        settings = get_entity_settings(entry.options, entity_id)
+        clear_days = settings.get("clear_days", -1)
+        
+        if clear_days >= 0:
+            # Auto-clear is enabled for this entity
+            await clear_completed_tasks_if_enabled(hass, entity_id, settings)
+            cleared_entities.append(entity_id)
+    
+    if cleared_entities:
+        LOGGER.info("Completed auto-clear check for %d entities: %s", 
+                   len(cleared_entities), cleared_entities)
+    else:
+        LOGGER.debug("No entities have auto-clear enabled")
+
+
+def schedule_auto_clear_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Schedule daily auto-clear checks at midnight.
+    
+    Args:
+        hass: Home Assistant instance
+        entry: Config entry with entity settings
+    """
+    LOGGER.debug("Setting up auto-clear midnight scheduler")
+    
+    @callback
+    def auto_clear_callback(now: datetime) -> None:
+        """Callback to run auto-clear check."""
+        LOGGER.debug("Auto-clear midnight trigger fired")
+        hass.async_create_background_task(
+            run_auto_clear_check(hass, entry),
+            name="todo_magic_auto_clear_check"
+        )
+    
+    # Schedule daily at midnight (00:00:00)
+    remove_tracker = event_helper.async_track_time_change(
+        hass,
+        auto_clear_callback,
+        hour=0,
+        minute=0,
+        second=0
+    )
+    
+    # Clean up tracker when unloading
+    entry.async_on_unload(remove_tracker)
+    
+    LOGGER.debug("Auto-clear scheduler initialized - will run daily at midnight")
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1378,6 +2180,16 @@ async def async_setup_entry(
 
     # Register update listener for options changes
     entry.add_update_listener(options_update_listener)
+
+    # Initialize smart list cleanup scheduler if enabled
+    smart_config = get_smart_list_settings(entry.options)
+    if smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        LOGGER.debug("Initializing smart list cleanup scheduler")
+        schedule_next_cleanup(hass, smart_config)
+
+    # Initialize auto-clear scheduler
+    LOGGER.debug("Initializing auto-clear scheduler")
+    schedule_auto_clear_check(hass, entry)
 
     # Set up platforms (keeping this empty since we don't need an actual platform)
     LOGGER.debug("Todo Magic setup complete")

@@ -18,15 +18,33 @@
         "description": "Configure Todo Magic features for your {todo_count} todo lists. Select which lists should have each feature enabled.",
         "data": {
           "auto_due_parsing_entities": "Auto Due Date Parsing",
-          "auto_sort_entities": "Auto Sort Tasks",
+          "auto_sort_entities": "Auto Sort Tasks", 
           "process_recurring_entities": "Process Recurring Tasks",
+          "enable_smart_lists": "Enable Smart Lists",
           "auto_clear_entities": "Auto-Clear Completed Tasks"
         },
         "data_description": {
           "auto_due_parsing_entities": "Todo lists that should automatically extract dates from task text and set due dates",
-          "auto_sort_entities": "Todo lists that should automatically sort tasks by due date and priority",
+          "auto_sort_entities": "Todo lists that should automatically sort tasks by due date and priority", 
           "process_recurring_entities": "Todo lists that should handle recurring tasks (e.g., [daily], [weekly])",
+          "enable_smart_lists": "Enable automatic task management across daily, weekly, and monthly lists based on due dates",
           "auto_clear_entities": "Todo lists that should automatically clear completed tasks (you'll configure days for each list in the next step)"
+        }
+      },
+      "smart_list_config": {
+        "title": "Smart List Configuration",
+        "description": "Configure your smart lists to automatically manage tasks based on due dates. Select which lists should handle daily, weekly, and monthly tasks from your {entity_count} available todo lists.",
+        "data": {
+          "daily_smart_list": "Daily Smart List",
+          "weekly_smart_list": "Weekly Smart List",
+          "monthly_smart_list": "Monthly Smart List",
+          "fallback_list": "Fallback List"
+        },
+        "data_description": {
+          "daily_smart_list": "List for tasks due today (tasks added elsewhere with today's due date will be replicated here)",
+          "weekly_smart_list": "List for tasks due this week (tasks added elsewhere with this week's due date will be replicated here)",
+          "monthly_smart_list": "List for tasks due this month (tasks added elsewhere with this month's due date will be replicated here)",
+          "fallback_list": "Default list for tasks that don't match any smart list timeframe (required when smart lists are enabled)"
         }
       },
       "auto_clear_config": {
