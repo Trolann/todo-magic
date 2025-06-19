@@ -549,42 +549,70 @@ async def replicate_task_to_smart_lists(hass: HomeAssistant, item: dict[str, Any
         else:
             due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
         
-        # Determine timeframe
+        # Determine which smart lists should contain this task (same logic as reflection)
         timeframe = analyze_task_timeframe(due_date)
-        target_list = get_smart_list_for_timeframe(timeframe, smart_config)
         
-        if not target_list or target_list == source_entity_id:
-            # No smart list for this timeframe or task is already in the right list
+        daily_list = smart_config.get(CONF_DAILY_LIST, "")
+        weekly_list = smart_config.get(CONF_WEEKLY_LIST, "")
+        monthly_list = smart_config.get(CONF_MONTHLY_LIST, "")
+        
+        target_smart_lists = []
+        
+        # A task can appear in multiple smart lists based on timeframe
+        if timeframe == 'today' and daily_list:
+            target_smart_lists.append(daily_list)
+        if timeframe in ['today', 'this_week'] and weekly_list:
+            target_smart_lists.append(weekly_list)
+        if timeframe in ['today', 'this_week', 'this_month'] and monthly_list:
+            target_smart_lists.append(monthly_list)
+        
+        if not target_smart_lists:
+            # No smart lists for this timeframe
+            LOGGER.debug("No smart lists configured for timeframe %s", timeframe)
             return
         
-        # Check if task already exists in target list to avoid duplicates
-        existing_task = await find_task_in_list(hass, target_list, item.get("summary", ""), due_date_str)
-        if existing_task:
-            LOGGER.debug("Task already exists in target smart list %s: %s", target_list, item.get("summary"))
-            return
-        
-        # Replicate task to target smart list
         summary = item.get("summary", "")
-        add_item_dict = {
-            "entity_id": target_list,
-            "item": summary,
-        }
+        replicated_count = 0
         
-        if "T" in due_date_str:
-            add_item_dict["due_datetime"] = due_date_str
+        # Replicate to all applicable smart lists
+        for target_list in target_smart_lists:
+            if target_list == source_entity_id:
+                # Skip if task is already in this list
+                continue
+                
+            # Check if task already exists in target list to avoid duplicates
+            existing_task = await find_task_in_list(hass, target_list, summary, due_date_str)
+            if existing_task:
+                LOGGER.debug("Task already exists in target smart list %s: %s", target_list, summary)
+                continue
+            
+            # Replicate task to this smart list
+            add_item_dict = {
+                "entity_id": target_list,
+                "item": summary,
+            }
+            
+            if "T" in due_date_str:
+                add_item_dict["due_datetime"] = due_date_str
+            else:
+                add_item_dict["due_date"] = due_date_str
+            
+            LOGGER.debug("Replicating task to smart list %s: %s", target_list, summary)
+            
+            await hass.services.async_call(
+                TODO_DOMAIN,
+                "add_item",
+                add_item_dict,
+                blocking=True
+            )
+            
+            replicated_count += 1
+            LOGGER.info("Replicated task to smart list %s: %s", target_list, summary)
+        
+        if replicated_count > 0:
+            LOGGER.info("Task replicated to %d smart lists: %s", replicated_count, summary)
         else:
-            add_item_dict["due_date"] = due_date_str
-        
-        LOGGER.debug("Replicating task to smart list %s: %s", target_list, summary)
-        
-        await hass.services.async_call(
-            TODO_DOMAIN,
-            "add_item",
-            add_item_dict,
-            blocking=True
-        )
-        
-        LOGGER.info("Replicated task to smart list %s: %s", target_list, summary)
+            LOGGER.debug("Task not replicated (already exists in target lists): %s", summary)
         
     except Exception as err:
         LOGGER.error("Error replicating task to smart lists: %s", err)
@@ -627,30 +655,42 @@ async def move_task_to_correct_list(hass: HomeAssistant, item: dict[str, Any],
             # Task is already in the correct list
             return
         
-        # Check if current list is a smart list
+        # Check if current list is a smart list or fallback list (all should participate in migration)
         all_smart_lists = [
             smart_config.get(CONF_DAILY_LIST, ""),
             smart_config.get(CONF_WEEKLY_LIST, ""),
-            smart_config.get(CONF_MONTHLY_LIST, "")
+            smart_config.get(CONF_MONTHLY_LIST, ""),
+            smart_config.get(CONF_FALLBACK_LIST, "")  # Include fallback list in migration
         ]
         
+        # Remove empty strings from the list
+        all_smart_lists = [lst for lst in all_smart_lists if lst]
+        
         if current_entity_id not in all_smart_lists:
-            # Task is not in a smart list, don't move it
+            # Task is not in a smart list or fallback list, don't move it
             return
         
         # Move task from current smart list to correct list
         summary = item.get("summary", "")
         
-        # First, add to correct list
+        # TODO: Abstract this add/remove pattern - used in recurring tasks too
+        # First, add to correct list (copying logic from create_recurring_task)
         add_item_dict = {
             "entity_id": correct_list,
             "item": summary,
         }
         
+        # Preserve the due date/time
         if "T" in due_date_str:
             add_item_dict["due_datetime"] = due_date_str
         else:
             add_item_dict["due_date"] = due_date_str
+        
+        # Preserve other important properties if they exist
+        if item.get("description"):
+            add_item_dict["description"] = item.get("description")
+        
+        LOGGER.debug("Adding task to %s: %s with data: %s", correct_list, summary, add_item_dict)
         
         await hass.services.async_call(
             TODO_DOMAIN,
@@ -660,6 +700,8 @@ async def move_task_to_correct_list(hass: HomeAssistant, item: dict[str, Any],
         )
         
         # Then remove from current list
+        LOGGER.debug("Removing task from %s: %s", current_entity_id, summary)
+        
         await hass.services.async_call(
             TODO_DOMAIN,
             "remove_item",
@@ -717,7 +759,13 @@ async def find_task_in_list(hass: HomeAssistant, entity_id: str, summary: str, d
 
 async def sync_task_completion_across_lists(hass: HomeAssistant, completed_item: dict[str, Any], 
                                           source_entity_id: str, smart_config: dict[str, Any]) -> None:
-    """Mark a task as completed in all lists where it exists.
+    """Mark a task as completed in ALL lists where it exists (original + all smart list reflections).
+    
+    This handles the smart list reflection architecture where a task can appear in:
+    - Its original list (Life List, Work List, etc.)  
+    - Daily smart list (if due today)
+    - Weekly smart list (if due this week)
+    - Monthly smart list (if due this month)
     
     Args:
         hass: Home Assistant instance
@@ -734,15 +782,19 @@ async def sync_task_completion_across_lists(hass: HomeAssistant, completed_item:
     if not summary:
         return
     
-    # Get all smart lists and fallback list
-    lists_to_check = []
-    for list_key in [CONF_DAILY_LIST, CONF_WEEKLY_LIST, CONF_MONTHLY_LIST, CONF_FALLBACK_LIST]:
-        list_id = smart_config.get(list_key, "")
-        if list_id and list_id != source_entity_id:
-            lists_to_check.append(list_id)
+    # Get ALL todo entities (not just configured smart lists)
+    # Because task could exist in any original list + smart list reflections
+    todo_entity_ids = [eid for eid in hass.states.async_entity_ids(TODO_DOMAIN)
+                      if hass.states.get(eid) and hass.states.get(eid).state != "unavailable"]
     
-    # Find and complete the task in other lists
-    for entity_id in lists_to_check:
+    synced_count = 0
+    
+    # Check every todo list for this task and mark it complete
+    for entity_id in todo_entity_ids:
+        if entity_id == source_entity_id:
+            # Skip the source list (already completed there)
+            continue
+            
         try:
             matching_task = await find_task_in_list(hass, entity_id, summary, due_date)
             if matching_task and matching_task.get("status") != "completed":
@@ -756,9 +808,13 @@ async def sync_task_completion_across_lists(hass: HomeAssistant, completed_item:
                     },
                     blocking=True
                 )
+                synced_count += 1
                 LOGGER.info("Synced task completion to %s: %s", entity_id, summary)
         except Exception as err:
             LOGGER.error("Error syncing task completion to %s: %s", entity_id, err)
+    
+    if synced_count > 0:
+        LOGGER.info("Task completion synced across %d lists: %s", synced_count + 1, summary)  # +1 for source list
 
 
 def sort_todo_items_by_due_date(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1125,11 +1181,30 @@ def state_changed_listener(hass: HomeAssistant, entry: ConfigEntry, evt: Event) 
     )
     
     # Also check for completed recurring tasks if recurring processing is enabled
+    # IMPORTANT: Only run recurring task logic on primary lists (not smart lists) to prevent duplicates
+    # TODO: When we clean this up, abstract the "is smart list" logic into a helper function
     if settings.get("process_recurring", False):
-        hass.async_create_background_task(
-            check_for_completed_recurring_tasks(hass, entity_id, settings),
-            name=f"todo_magic_recurring_{entity_id}"
-        )
+        smart_config = get_smart_list_settings(entry.options)
+        
+        # Check if this entity is a smart list (reflection only)
+        is_smart_list = False
+        if smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+            smart_lists = [
+                smart_config.get(CONF_DAILY_LIST, ""),
+                smart_config.get(CONF_WEEKLY_LIST, ""),
+                smart_config.get(CONF_MONTHLY_LIST, "")
+            ]
+            smart_lists = [lst for lst in smart_lists if lst]  # Remove empty strings
+            is_smart_list = entity_id in smart_lists
+        
+        if not is_smart_list:
+            # Only run recurring logic on non-smart lists (primary lists)
+            hass.async_create_background_task(
+                check_for_completed_recurring_tasks(hass, entity_id, settings),
+                name=f"todo_magic_recurring_{entity_id}"
+            )
+        else:
+            LOGGER.debug("Skipping recurring task processing for smart list %s (prevents duplicates)", entity_id)
     
     # Check for completed tasks that need to be synced across smart lists
     if smart_config.get(CONF_ENABLE_SMART_LISTS, False):
@@ -1397,30 +1472,10 @@ async def process_new_todo_item(hass: HomeAssistant, entity_id: str, settings: d
             LOGGER.debug("Triggering auto-sort for %s after processing new item", entity_id)
             await apply_auto_sort_if_enabled(hass, entity_id, settings)
             
-            # Process smart list logic if enabled
-            if smart_config and smart_config.get(CONF_ENABLE_SMART_LISTS, False):
-                # Get the updated item after processing to include due date
-                try:
-                    result = await hass.services.async_call(
-                        TODO_DOMAIN,
-                        "get_items",
-                        {"entity_id": entity_id},
-                        blocking=True,
-                        return_response=True
-                    )
-                    
-                    if result and entity_id in result and "items" in result[entity_id]:
-                        items = result[entity_id]["items"]
-                        # Find the item we just processed
-                        for item in items:
-                            if item.get("summary") == new_summary and item.get("due"):
-                                # Replicate to appropriate smart lists
-                                await replicate_task_to_smart_lists(hass, item, entity_id, smart_config)
-                                # Check if this task needs to be moved (if it's in wrong smart list)
-                                await move_task_to_correct_list(hass, item, entity_id, smart_config)
-                                break
-                except Exception as smart_err:
-                    LOGGER.error("Error processing smart list logic: %s", smart_err)
+            # Smart list population is handled by:
+            # 1. Midnight scheduler (run_smart_list_reflection_check)
+            # 2. Manual service calls (todo_magic.populate_smart_lists)
+            # No immediate replication during new item processing
         else:
             LOGGER.debug("No date could be determined for item: %s", summary)
 
@@ -1725,6 +1780,7 @@ async def create_recurring_task(hass: HomeAssistant, entity_id: str, original_su
             task_key = f"{entity_id}:{new_summary}"
             NEWLY_CREATED_RECURRING_TASKS.add(task_key)
             
+            # TODO: Abstract this add_item pattern - also used in move_task_to_correct_list and replicate_task_to_smart_lists
             add_item_dict = {
                 "entity_id": entity_id,
                 "item": new_summary,
@@ -2091,6 +2147,173 @@ async def clear_completed_tasks_if_enabled(hass: HomeAssistant, entity_id: str, 
         LOGGER.error("Error during auto-clear for %s: %s", entity_id, err)
 
 
+async def run_smart_list_reflection_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Run smart list reflection check - ensure tasks appear in appropriate smart lists.
+    
+    This creates reflections/copies of tasks in smart lists based on due dates,
+    without moving them from their original lists.
+    
+    Args:
+        hass: Home Assistant instance
+        entry: Config entry with smart list settings
+    """
+    LOGGER.debug("Running smart list reflection check")
+    
+    smart_config = get_smart_list_settings(entry.options)
+    if not smart_config.get(CONF_ENABLE_SMART_LISTS, False):
+        LOGGER.debug("Smart lists disabled, skipping reflection check")
+        return
+    
+    # Get all todo entities
+    todo_entity_ids = [eid for eid in hass.states.async_entity_ids(TODO_DOMAIN)
+                      if hass.states.get(eid) and hass.states.get(eid).state != "unavailable"]
+    
+    if not todo_entity_ids:
+        LOGGER.debug("No todo entities found for smart list reflection check")
+        return
+    
+    daily_list = smart_config.get(CONF_DAILY_LIST, "")
+    weekly_list = smart_config.get(CONF_WEEKLY_LIST, "")
+    monthly_list = smart_config.get(CONF_MONTHLY_LIST, "")
+    
+    smart_lists = [daily_list, weekly_list, monthly_list]
+    smart_lists = [lst for lst in smart_lists if lst]  # Remove empty strings
+    
+    if not smart_lists:
+        LOGGER.debug("No smart lists configured")
+        return
+    
+    # Step 1: Clear existing smart list contents (they're just reflections)
+    for smart_list in smart_lists:
+        if smart_list in todo_entity_ids:
+            try:
+                await hass.services.async_call(
+                    TODO_DOMAIN,
+                    "remove_completed_items",
+                    {"entity_id": smart_list},
+                    blocking=True
+                )
+                # Also remove incomplete items by getting and removing each one
+                result = await hass.services.async_call(
+                    TODO_DOMAIN,
+                    "get_items",
+                    {"entity_id": smart_list},
+                    blocking=True,
+                    return_response=True
+                )
+                
+                if result and smart_list in result and "items" in result[smart_list]:
+                    for item in result[smart_list]["items"]:
+                        if item.get("status") != "completed":
+                            await hass.services.async_call(
+                                TODO_DOMAIN,
+                                "remove_item",
+                                {
+                                    "entity_id": smart_list,
+                                    "item": item.get("summary", "")
+                                },
+                                blocking=True
+                            )
+                
+                LOGGER.debug("Cleared smart list for reflection: %s", smart_list)
+                
+            except Exception as clear_err:
+                LOGGER.error("Error clearing smart list %s: %s", smart_list, clear_err)
+    
+    reflected_tasks = 0
+    
+    # Step 2: Scan all non-smart lists and reflect tasks into appropriate smart lists
+    for entity_id in todo_entity_ids:
+        # Skip smart lists themselves (they're just reflections)
+        if entity_id in smart_lists:
+            continue
+            
+        try:
+            # Get all items from this source list
+            result = await hass.services.async_call(
+                TODO_DOMAIN,
+                "get_items",
+                {"entity_id": entity_id},
+                blocking=True,
+                return_response=True
+            )
+            
+            if not result or entity_id not in result or "items" not in result[entity_id]:
+                continue
+            
+            items = result[entity_id]["items"]
+            
+            for item in items:
+                if item.get("status") == "completed":
+                    continue
+                
+                due_date_str = item.get("due", "")
+                if not due_date_str:
+                    continue
+                
+                try:
+                    # Parse due date
+                    if "T" in due_date_str:
+                        due_date = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
+                        due_date = due_date.replace(tzinfo=None)
+                    else:
+                        due_date = datetime.strptime(due_date_str, "%Y-%m-%d")
+                    
+                    # Determine which smart lists should reflect this task
+                    timeframe = analyze_task_timeframe(due_date)
+                    target_smart_lists = []
+                    
+                    # A task can appear in multiple smart lists
+                    if timeframe == 'today' and daily_list:
+                        target_smart_lists.append(daily_list)
+                    if timeframe in ['today', 'this_week'] and weekly_list:
+                        target_smart_lists.append(weekly_list)
+                    if timeframe in ['today', 'this_week', 'this_month'] and monthly_list:
+                        target_smart_lists.append(monthly_list)
+                    
+                    # Reflect task in appropriate smart lists
+                    for target_list in target_smart_lists:
+                        if target_list in todo_entity_ids:
+                            summary = item.get("summary", "")
+                            
+                            # Add reflection to smart list
+                            add_item_dict = {
+                                "entity_id": target_list,
+                                "item": summary,
+                            }
+                            
+                            if "T" in due_date_str:
+                                add_item_dict["due_datetime"] = due_date_str
+                            else:
+                                add_item_dict["due_date"] = due_date_str
+                            
+                            # Preserve other properties
+                            if item.get("description"):
+                                add_item_dict["description"] = item.get("description")
+                            
+                            await hass.services.async_call(
+                                TODO_DOMAIN,
+                                "add_item",
+                                add_item_dict,
+                                blocking=True
+                            )
+                            
+                            reflected_tasks += 1
+                            LOGGER.debug("Reflected task from %s to %s: %s", 
+                                       entity_id, target_list, summary)
+                
+                except Exception as item_err:
+                    LOGGER.error("Error processing item for reflection: %s", item_err)
+        
+        except Exception as list_err:
+            LOGGER.error("Error processing list %s for reflection: %s", entity_id, list_err)
+    
+    if reflected_tasks > 0:
+        LOGGER.info("Smart list reflection check completed: reflected %d tasks", reflected_tasks)
+    else:
+        LOGGER.debug("Smart list reflection check completed: no tasks to reflect")
+
+
 async def run_auto_clear_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Run auto-clear check for all configured entities.
     
@@ -2124,6 +2347,39 @@ async def run_auto_clear_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
                    len(cleared_entities), cleared_entities)
     else:
         LOGGER.debug("No entities have auto-clear enabled")
+
+
+def schedule_smart_list_reflection_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Schedule daily smart list reflection checks at midnight.
+    
+    Args:
+        hass: Home Assistant instance
+        entry: Config entry with smart list settings
+    """
+    LOGGER.debug("Setting up smart list reflection midnight scheduler")
+    
+    @callback
+    def smart_list_reflection_callback(now: datetime) -> None:
+        """Callback to run smart list reflection check."""
+        LOGGER.debug("Smart list reflection midnight trigger fired")
+        hass.async_create_background_task(
+            run_smart_list_reflection_check(hass, entry),
+            name="todo_magic_smart_list_reflection_check"
+        )
+    
+    # Schedule daily at midnight (00:00:00)
+    remove_tracker = event_helper.async_track_time_change(
+        hass,
+        smart_list_reflection_callback,
+        hour=0,
+        minute=0,
+        second=0
+    )
+    
+    # Clean up tracker when unloading
+    entry.async_on_unload(remove_tracker)
+    
+    LOGGER.debug("Smart list reflection scheduler initialized - will run daily at midnight")
 
 
 def schedule_auto_clear_check(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -2181,11 +2437,36 @@ async def async_setup_entry(
     # Register update listener for options changes
     entry.add_update_listener(options_update_listener)
 
+    # Register populate_smart_lists service
+    async def handle_populate_smart_lists(call):
+        """Handle the populate_smart_lists service call."""
+        entity_id = call.data.get("entity_id")
+        
+        if entity_id:
+            # For specific entity, just run full reflection (simpler and more consistent)
+            LOGGER.debug("Populating smart lists (triggered for entity: %s, running full reflection)", entity_id)
+            await run_smart_list_reflection_check(hass, entry)
+        else:
+            # Populate all smart lists
+            LOGGER.debug("Populating all smart lists")
+            await run_smart_list_reflection_check(hass, entry)
+
+    hass.services.async_register(
+        DOMAIN,
+        "populate_smart_lists",
+        handle_populate_smart_lists,
+        schema=None  # Optional entity_id parameter
+    )
+
     # Initialize smart list cleanup scheduler if enabled
     smart_config = get_smart_list_settings(entry.options)
     if smart_config.get(CONF_ENABLE_SMART_LISTS, False):
         LOGGER.debug("Initializing smart list cleanup scheduler")
         schedule_next_cleanup(hass, smart_config)
+        
+        # Initialize smart list reflection scheduler
+        LOGGER.debug("Initializing smart list reflection scheduler")
+        schedule_smart_list_reflection_check(hass, entry)
 
     # Initialize auto-clear scheduler
     LOGGER.debug("Initializing auto-clear scheduler")
